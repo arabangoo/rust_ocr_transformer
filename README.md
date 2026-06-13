@@ -9,11 +9,13 @@
 이 문서는 라이브러리의 **개발자 매뉴얼**이다. 설계 원칙, 공개 API, 작업별 동작과 성숙도,
 CLI/Python 사용법, 모델 준비, 서비스 통합, 새 작업/백엔드 추가법, 빌드·테스트 절차를 담는다.
 
-> **현재 성숙도(정직 고지).** OCR(텍스트 검출+인식)은 실제 PP-OCRv5 한국어 모델로 CPU에서
-> end-to-end 동작을 검증했다. 분류·객체 검출 백엔드는 컴파일·구조는 갖췄으나 실모델 정확도는
-> 미검증이고, 레이아웃·세그멘테이션은 trait 정의만 있으며, 영상 디코드는 미구현(Phase 2)이다.
-> 각 작업의 상태는 [7장](#7-작업별-동작과-성숙도)에 명시한다. 광학 문자 인식(OCR), 비전-언어
-> 모델(VLM), 외부 함수 인터페이스(FFI)는 본문에서 약자로 쓴다.
+[주요 참고 논문]
+
+1. DBNet: Real-time Scene Text Detection with Differentiable Binarization (텍스트 검출 + DB 후처리) - https://arxiv.org/abs/1911.08947
+2. CRNN: An End-to-End Trainable Neural Network for Image-based Sequence Recognition (CNN+RNN+CTC 시퀀스 인식) - https://arxiv.org/abs/1507.05717
+3. SVTR: Scene Text Recognition with a Single Visual Model (PP-OCRv5 인식 백본) - https://arxiv.org/abs/2205.00159
+4. PP-OCR: A Practical Ultra Lightweight OCR System (임베드하는 경량 OCR 모델군) - https://arxiv.org/abs/2009.09941
+5. Image Quality Assessment: From Error Visibility to Structural Similarity (SSIM — 영상 프레임 샘플링 게이트) - https://ece.uwaterloo.ca/~z70wang/research/ssim/
 
 ---
 
