@@ -1,590 +1,634 @@
-# rust-ocr-transformer
+# rust_ocr_transformer
 
-> **영상 우선(Video-First) Rust 광학 문자 인식(OCR) 파이프라인** — 이미지 인식은 기성 크레이트로 임베드하고,
-> 시간축(temporal) 처리에 핵심 지식재산(IP)을 집중한다. 문서 파서(텍스트 입구)와 결합해
-> "무엇이든 삼키는" **통합 인제스트 엔진**의 *비전 팔(Vision Arm)*이 되어 검색 증강 생성(RAG) 엔진에 공급한다.
+> **Rust 기반 통합 비전 추론·처리 프레임워크**
+>
+> 이미지·영상을 `디코드 → 전처리 → 신경망 모델 추론 → 후처리 → 구조화 출력`으로 흘려보낸다.
+> 작업별 모델(텍스트 검출·인식, 분류, 객체 검출, 레이아웃, 세그멘테이션)을 trait 뒤에 꽂아
+> 교체하는 오케스트레이션 틀이며, 기본 추론은 **순수 Rust(`tract`) / zero FFI / CPU** 로 동작한다.
 
-이 문서는 흩어져 있던 설계 노트(배경·guide_01·guide_02)를 **하나로 통합한 단일 개발자 설계 문서**다. 비전과 원칙부터 아키텍처, 추론 스택 결정, trait 설계, 멀티스레드 파이프라인, 성능 예산, 빌드 전략, 의존성 초안까지 — 코드를 짜기 직전에 합의해야 할 모든 것을 담는다. 본 문서가 정본이며, 분리돼 있던 `00-background.md`·`guide_01.md`·`guide_02.md`의 내용을 모두 흡수한다.
+이 문서는 라이브러리의 **개발자 매뉴얼**이다. 설계 원칙, 공개 API, 작업별 동작과 성숙도,
+CLI/Python 사용법, 모델 준비, 서비스 통합, 새 작업/백엔드 추가법, 빌드·테스트 절차를 담는다.
 
-**상태: 설계 단계(Design phase).** 구현 전, 이 문서로 서사와 아키텍처를 확정한다. 스케치 수준의 Rust 코드는 "이렇게 생긴다"를 보여주기 위함이며, 최종 형태는 개념 증명(PoC)에서 확정한다.
+> **현재 성숙도(정직 고지).** OCR(텍스트 검출+인식)은 실제 PP-OCRv5 한국어 모델로 CPU에서
+> end-to-end 동작을 검증했다. 분류·객체 검출 백엔드는 컴파일·구조는 갖췄으나 실모델 정확도는
+> 미검증이고, 레이아웃·세그멘테이션은 trait 정의만 있으며, 영상 디코드는 미구현(Phase 2)이다.
+> 각 작업의 상태는 [7장](#7-작업별-동작과-성숙도)에 명시한다. 광학 문자 인식(OCR), 비전-언어
+> 모델(VLM), 외부 함수 인터페이스(FFI)는 본문에서 약자로 쓴다.
 
 ---
 
 ## 목차
 
-1. [한 줄 정의와 비전](#1-한-줄-정의와-비전)
-2. [핵심 설계 원칙](#2-핵심-설계-원칙)
-3. [두 페르소나](#3-두-페르소나)
-4. [배경 — 왜 Rust이고 무엇이 진짜 병목인가](#4-배경--왜-rust이고-무엇이-진짜-병목인가)
-5. [아키텍처](#5-아키텍처)
-6. [추론 스택 결정 — ort + ONNX](#6-추론-스택-결정--ort--onnx)
-7. [핵심 API 설계 — trait OcrEngine](#7-핵심-api-설계--trait-ocrengine)
-8. [실시간 멀티스레드 파이프라인](#8-실시간-멀티스레드-파이프라인)
-9. [해자 1 — SSIM 샘플링 게이트](#9-해자-1--ssim-샘플링-게이트)
-10. [해자 2 — temporal 병합](#10-해자-2--temporal-병합)
-11. [성능 예산](#11-성능-예산)
-12. [빌드 전략 — A → B → C](#12-빌드-전략--a--b--c)
-13. [Cargo.toml 의존성 초안](#13-cargotoml-의존성-초안)
-14. [의사결정 기록 (ADR)](#14-의사결정-기록-adr)
-15. [크레이트 비교](#15-크레이트-비교)
-16. [로드맵](#16-로드맵)
-17. [활용 시나리오](#17-활용-시나리오)
-18. [생태계 내 위치와 통합 인제스트](#18-생태계-내-위치와-통합-인제스트)
-19. [상태와 다음 행동](#19-상태와-다음-행동)
-20. [참고 출처](#20-참고-출처)
+1. [핵심 특징](#1-핵심-특징)
+2. [빠른 시작](#2-빠른-시작)
+3. [설치와 Cargo Feature](#3-설치와-cargo-feature)
+4. [아키텍처](#4-아키텍처)
+5. [공통 타입 레퍼런스](#5-공통-타입-레퍼런스)
+6. [공개 API 레퍼런스](#6-공개-api-레퍼런스)
+7. [작업별 동작과 성숙도](#7-작업별-동작과-성숙도)
+8. [영상 시간축 처리](#8-영상-시간축-처리)
+9. [CLI 도구 (`roct`)](#9-cli-도구-roct)
+10. [Python 바인딩 (PyO3)](#10-python-바인딩-pyo3)
+11. [모델 준비 (ONNX 모델·사전)](#11-모델-준비-onnx-모델사전)
+12. [서비스 파이프라인에 붙이기](#12-서비스-파이프라인에-붙이기)
+13. [새 작업·백엔드 추가하기](#13-새-작업백엔드-추가하기)
+14. [빌드 · Feature 조합 · 테스트](#14-빌드--feature-조합--테스트)
+15. [디렉토리 구조](#15-디렉토리-구조)
+16. [라이선스](#16-라이선스)
 
 ---
 
-## 1. 한 줄 정의와 비전
+## 1. 핵심 특징
 
-이미지·영상에서 텍스트를 추출하되, **영상을 1급 시민으로** 다루는 Rust 라이브러리. 프레임을 똑똑하게 샘플링하고(구조적 유사도 SSIM), 프레임 간 중복을 제거하며(Levenshtein 편집거리), 타임스탬프와 함께 구조화된 텍스트를 내보낸다. 단일 바이너리로 엣지에서도 동작한다.
+비전 파이프라인에서 과소평가되는 영역이 **전·후처리와 오케스트레이션**이다. 모델이 아무리 좋아도
+입력 정규화·검출 후처리·디코딩 규약이 어긋나면 결과가 무너진다. 이 라이브러리는 단일 만능 모델이
+아니라, 그 위아래의 시스템 엔지니어링을 책임지는 **틀**을 지향한다.
 
-### 왜 이 프로젝트인가 — 빈틈이 곧 기회
+| 원칙 | 의미 |
+|---|---|
+| **모델은 담지 않고 꽂는다** | "지능"은 trait 뒤의 모델 몫이다. 프레임워크는 디코드·전처리·후처리·조립을 맡는다. 같은 입력이면 같은 모델로 같은 결과(결정적). |
+| **작업 단위 추상화** | 텍스트 검출/인식, 분류, 객체 검출, 레이아웃, 세그멘테이션을 각각의 trait 으로 분리. 새 모델은 trait 하나만 구현하면 끼워진다. |
+| **순수 Rust 기본 / zero FFI** | 기본 추론 엔진은 `tract`(순수 Rust ONNX 런타임). C++ ONNX Runtime·CUDA·subprocess 불필요. CPU 단일 바이너리·클린 abi3 휠. 속도/GPU 가 필요하면 `ort` 를 opt-in 으로 더한다. |
+| **영상 1급 시민** | 정지 이미지는 프레임 1개인 영상의 퇴화 사례. 같은 파이프라인이 둘 다 받고, 영상에는 SSIM 샘플링·시간축 병합이 더해진다. |
 
-- 러스트 **이미지 OCR**은 이미 포화 상태다 (oar-ocr, ocrs, rusto-rs, ocr-rs).
-  → 또 만들면 "다섯 번째 PaddleOCR 래퍼"일 뿐. **만들지 않고 임베드한다.**
-- 러스트 **영상 OCR 파이프라인**은 비어 있다.
-  → 진짜 어려움은 시간축에 있고, 그곳이 Rust가 Python을 압도하는 영역이다.
-- "**만능 OCR**"은 야망이 아니라 초점 상실의 신호다.
-  → 스캔문서·장면텍스트·손글씨·수식·자막은 각각 독립 분야. **영상 자막/화면텍스트로 좁힌다.**
+### "이해"는 코어 밖이다
 
----
-
-## 2. 핵심 설계 원칙
-
-1. **언어는 배포 디테일이다.** 모델 가중치는 Python이든 Rust든 동일하다. Rust의 가치는 가중치를 줄이는 마법이 아니라, 런타임을 가볍고 예측 가능하게 만드는 데 있다.
-2. **빠르다 = OCR을 덜 호출한다.** 30fps 전부를 OCR하는 건 낭비다. SSIM 샘플링으로 호출 횟수를 줄이는 게 핵심.
-3. **만들지 말고 조립하라.** 인식 모델은 PaddleOCR/PP-OCRv5 등 기성품. 우리 IP는 그 위아래의 오케스트레이션이다.
-4. **시간축이 차별점이다.** 샘플링·중복제거·추적·타임스탬핑이 진짜 가치.
-5. **통합 인제스트의 일부.** 단독 도구가 아니라, 문서 파서와 함께 RAG 엔진의 입구를 이룬다.
+이 프레임워크가 만드는 것은 "무엇이 어디에 있다"(텍스트·박스·클래스·좌표)까지의 **구조화된 비전
+결과**다. "이 영수증을 JSON 으로 해석", "사고 사진의 손상 부위 판독" 같은 **이해·추론**은 대형
+VLM/LLM 의 몫이며, 그건 코어 밖(서버 등)에 위임하고 이 프레임워크는 그 입력을 만든다. 순수 문자
+인식은 소형 특화 모델이 프론티어 LLM 보다 정확하고 결정적·저비용이므로, 코어는 LLM-free 로 둔다.
 
 ---
 
-## 3. 두 페르소나
+## 2. 빠른 시작
 
-- **클라우드 AI 컨설턴트 모드 (주력)** — CCTV·규제 문서 영상·화면 캡처에서 텍스트를 대량 추출. 실무 수요가 명확하다. 이 프로젝트는 정직하게 컨설턴트 정체성에 베팅한다.
-- **크툴루 신화 작가 모드 (부차)** — 고서·필름 스틸·삽화에서 로어(lore) 텍스트 추출. 영상 OCR과의 연결은 약하므로, 작가 모드는 통합 RAG의 "작가 비서" 단계에서 본격화한다.
-
----
-
-## 4. 배경 — 왜 Rust이고 무엇이 진짜 병목인가
-
-큰 질문은 "고급 AI를 소형기기에서 돌릴 수 있는가"이다. 컴퓨터 역사의 궤적(메인프레임 → PC → 스마트폰)은 소형화의 역사였고, AI도 같은 길을 간다. 핵심은 그 경로에서 **Rust의 역할을 정확히 위치시키는 것**이다.
-
-### 4.1 언어는 모델 무게와 무관하다
-
-가장 흔한 오해부터 푼다. Python은 모델을 무겁게 만드는 주범이 아니다. Python은 오케스트레이션(지휘)일 뿐, 실제 행렬 연산은 이미 CUDA/C++/Metal로 컴파일된 커널에서 돈다. 모델 가중치라는 숫자 덩어리는 Python으로 훈련하든 Rust로 훈련하든 **완전히 동일**하다.
-
-→ "Rust로 훈련하면 가벼워진다"는 **틀렸다.** 훈련은 여전히 PyTorch 생태계가 압도적이다.
-
-### 4.2 경량화의 진짜 레버 — 양자화
-
-경량화의 핵심은 **양자화(quantization)**이고, 이건 언어 중립적이다.
-
-- FP16(16비트) → INT8 → INT4 → BitNet의 1.58비트(ternary, -1/0/1)
-- 4비트·8비트 양자화는 이전 세대 대비 약 75% 공간 절감, 일반 작업 정확도는 거의 유지.
-
-Rust가 끼어들 자리는 양자화 알고리즘 발명이 아니라, **양자화된 모델을 효율적으로 실행하는 런타임**이다.
-
-### 4.3 트랜스포머의 한계인가
-
-소형기기의 진짜 적은 트랜스포머의 두 구조적 비용이다.
-
-1. **어텐션 O(n²)** — 입력이 길수록 연산이 제곱으로 폭증.
-2. **KV 캐시(key-value 캐시)** — 컨텍스트가 길수록 RAM을 선형으로 잠식. 폰의 제한된 RAM이 진짜 천장이다.
-
-그러나 이는 "한계"가 아니라 가장 뜨거운 연구 전선이다.
-
-- **상태공간모델(SSM)/Mamba** — 선형 스케일, KV 캐시 없음.
-- **하이브리드** — Phi-4 SambaY처럼 SSM과 어텐션을 결합.
-- **희소 전문가 혼합(MoE)** — 희소 활성화로 연산 절감.
-
-방향은 정확히 소형화 쪽이다.
-
-### 4.4 그래서 Rust의 진짜 자리
-
-Rust는 모델을 가볍게 만드는 게 아니라 **실행 환경을 가볍고 예측 가능하게** 만든다.
-
-- 단일 약 10MB 바이너리 (Python 약 200MB 도커 이미지 대비) → 엣지 배포·비용 우위.
-- 가비지 컬렉션(GC) 없음 → 비결정적 지연 멈춤 제거, 예측 가능한 메모리 동작을 컴파일 타임에 보장.
-- 동시성 안전 → 전역 인터프리터 락(GIL) 없이 다중 추론 요청을 병렬 처리.
-
-단, 냉정하게: 핫패스 부동소수 연산량(FLOPs)은 Rust ≈ C++(llama.cpp)이며, 진짜 속도는 커널과 양자화에서 나온다. Rust의 승부처는 순수 연산 속도가 아니라 **안전성·배포 풋프린트·파이프라인 오케스트레이션**이다.
-
----
-
-## 5. 아키텍처
-
-### 5.1 전체 파이프라인
-
-```text
-입력: 이미지 / 영상
-  ↓
-[1] 디코드 — image 크레이트 / ffmpeg 바인딩
-  ↓
-[2] 스마트 프레임 샘플링 — SSIM 임계값으로 유사 프레임 스킵      (영상 전용 · 핵심 IP)
-  ↓
-[3] 텍스트 탐지(Detection) — 기성 크레이트 임베드
-  ↓
-[4] 텍스트 인식(Recognition) — PaddleOCR/PP-OCRv5 모델(ONNX/MNN)
-  ↓
-[5] 시간축 병합 — Levenshtein 편집거리로 인접 프레임 중복 제거    (핵심 IP)
-  ↓
-[6] 출력 — SRT(자막 파일) / 타임스탬프 JSON / 평문
-  ↓
-[7] RAG 인제스트 — 청킹 → 임베딩 → 벡터 인덱스(통합 엔진 연동)
-```
-
-### 5.2 모듈 경계
-
-| 모듈 | 책임 | 만들기 vs 임베드 |
-|---|---|---|
-| `decode` | 이미지/영상 디코딩, 프레임 추출 | 임베드 (image, ffmpeg 바인딩) |
-| `sampler` | SSIM 기반 프레임 샘플링, 자막 영역 탐지 | **직접 구현 (핵심 IP)** |
-| `ocr` | 탐지+인식 래퍼 (백엔드 추상화) | 임베드 (oar-ocr/ocrs/rusto-rs) |
-| `temporal` | 편집거리 중복제거, 추적, 타임스탬프 정렬 | **직접 구현 (핵심 IP)** |
-| `emit` | SRT/JSON/평문 직렬화 | 직접 구현 (가벼움) |
-| `ingest` | 청킹·임베딩 어댑터, RAG 연동 | 임베드 (코어 스택 재활용) |
-
-설계 의도: 인식 백엔드를 trait로 추상화해 교체 가능하게 두고, 우리 가치는 `sampler` + `temporal`에 응축한다. 두 모듈이 곧 이 프로젝트의 해자(moat)다.
-
-### 5.3 "빠르게"의 정확한 의미
-
-OCR 자체를 빠르게 하는 게 아니라, **OCR 호출 횟수를 줄여 전체를 빠르게** 한다. 30fps 영상에서 자막은 초당 수 프레임만 바뀐다. SSIM으로 정적 구간을 스킵하면 인식 호출이 한 자릿수 %까지 줄 수 있다. 디코드 → 샘플링 → 배치추론 → 병합의 입출력·동시성·메모리 집약 구간이 Rust가 Python을 압도하는 지점이다.
-
-### 5.4 "만능 OCR" 함정의 재확인 — 코어인가 오케스트레이터인가
-
-"OpenCV 같은 만능 OCR 코어"라는 표현은 두 개의 서로 다른 물건을 한 단어로 부르게 만든다.
-
-- **OpenCV** = 컴퓨터 비전 *프리미티브* 라이브러리(필터·변환·특징점). 태스크가 아니라 부품 모음.
-- **OCR** = 그 부품들 위에 올라가는 *태스크*. 검출 + 인식 신경망이 핵심.
-
-따라서 "만능 OCR 코어"를 글자 그대로 만들면 두 작업이 뒤섞인다. [ADR-3·ADR-4](#14-의사결정-기록-adr)가 이미 결론을 냈다 — **인식 모델은 만들지 않고, 범위는 영상 자막/화면텍스트로 좁힌다.** 그러면 우리가 만드는 "코어"의 정체가 명확해진다.
-
-> 모델을 플러그인처럼 갈아끼우는 **추론 파이프라인 + 비디오 시간 로직 엔진.**
-
-이 정의가 [빌드 전략(12장)](#12-빌드-전략--a--b--c)을 가른다. 단순 호출이면 *오케스트레이터*, trait로 백엔드를 추상화하면 *통합 코어*다.
-
-### 5.5 이미지 = 영상의 1프레임 — 통합되는 것과 아닌 것
-
-핵심 아키텍처 원칙: **이미지는 영상의 퇴화 사례(degenerate case)다.** 정지 이미지는 프레임이 1개인 영상이고, 그래서 이미지와 영상은 별개 제품이 아니라 **하나의 파이프라인**으로 처리된다. [7장의 `OcrEngine::read(frame)`](#7-핵심-api-설계--trait-ocrengine) trait가 프레임 단위로 추상화돼 있어, 영상은 프레임 스트림, 이미지는 프레임 1개일 뿐이다. 이미지 경로는 [SSIM 게이트(9장)](#9-해자-1--ssim-샘플링-게이트)와 [temporal 병합(10장)](#10-해자-2--temporal-병합)을 건너뛰고 `read`를 한 번 호출하는 것과 같다.
-
-그래서 "이미지부터 만들고 나중에 영상을 붙인다"가 아니라, **처음부터 영상 기준으로 trait를 설계하고 이미지를 그 부분집합으로 둔다.** 이미지 MVP(Phase 1)는 별도 제품이 아니라 trait·백엔드를 고정하는 발판이며, 거기서 시간축 레이어(Phase 2)가 자연 성장한다. 이미지를 독립 제품으로 굳히면 API가 이미지 모양으로 고정돼 나중에 영상의 시간축 요구와 싸우게 되므로, 통합은 **설계 시점부터** 한다.
-
-#### 통합되는 것 vs 통합되지 않는 것 (혼동 금지)
-
-"한 파이프라인"은 **입력 양식**의 통합이지 **인식 범위**의 통합이 아니다. 이 둘을 섞으면 곧장 [ADR-4](#14-의사결정-기록-adr)가 거부한 "만능 OCR" 함정에 빠진다.
-
-| 구분 | 통합되는가 | 설명 |
-|---|---|---|
-| 입력 양식 (정지 이미지 / 움직이는 영상) | 통합됨 | 이미지 = 1프레임 영상. 한 파이프라인이 둘 다 받는다 |
-| 인식 범위 (자막·화면텍스트 / 손글씨 / 수식 / 임의 장면텍스트 / 모든 언어) | 통합 안 됨 | 각각 독립 연구분야. 범위는 영상 자막·화면텍스트로 좁힌다 |
-
-두 가지를 못 박는다.
-
-1. **인식 정확도·범위는 우리 IP가 아니다.** 실제로 글자를 읽는 건 임베드한 백엔드(PaddleOCR 등)다. 파이프라인을 통합해도 백엔드가 손글씨·수식을 더 잘 읽게 되지 않는다. 우리 해자는 시간축 오케스트레이션(샘플링·병합)이다.
-2. **범용 커버리지는 발명이 아니라 교체로 빌려온다.** 더 강한 다국어·손글씨 모델이 나오면 trait 뒤에서 백엔드를 갈아끼운다([ADR-3](#14-의사결정-기록-adr)). 이는 백엔드의 능력을 빌리는 것이지 우리가 "만능"을 만드는 게 아니다.
-
-따라서 고도화된 완성형은 "모든 이미지·영상을 읽는 만능 OCR"이 아니라, **영상 자막·화면텍스트 영역에서 가장 깊고 시간축에서 독보적인, 이미지·영상을 한 길로 처리하는 Rust 파이프라인**이다. "초강력"은 넓은 커버리지가 아니라 좁은 영역의 깊이 + 시간축 + 배포 경량성에서 나온다.
-
----
-
-## 6. 추론 스택 결정 — ort + ONNX
-
-인식 엔진은 직접 짜지 않고 ONNX 모델을 `ort`(ONNX Runtime의 Rust 래퍼)로 돌린다. 2026년 현재 근거는 다음과 같다.
-
-- **성숙도** — ort 2.0.0-rc.x는 문서상 "production-ready(API는 아직 안정화 전)"로, 신규·기존 프로젝트 모두에 권장된다. Google Magika, SurrealDB 등 실사용 사례가 누적됐다.
-- **성능** — 동일 조건에서 Python(transformers+PyTorch)이 CPU 약 100 / GPU 약 1,000 문장/초인 반면, Rust+ONNX Runtime은 CPU 약 400 / GPU 약 5,000 문장/초. 메모리 베이스라인은 약 2GB에서 약 100MB로, 콜드 스타트는 3-5초에서 200-500ms로 떨어진다.
-- **하드웨어 추상화** — CUDA, TensorRT, OpenVINO, Qualcomm QNN, Huawei CANN을 실행 공급자(execution provider)로 추상화 → 코드 변경 최소화로 백엔드 전환.
-- **모델 호환** — PyTorch/TensorFlow/PaddlePaddle에서 export한 ONNX를 그대로 적재. PaddleOCR은 Paddle2ONNX로 변환 후 ONNX Runtime GPU로 추론 가능.
-
-> 정직한 단서: 핫패스 FLOPs는 Rust ≈ C++다. 진짜 속도 우위는 *런타임 경량성·동시성·OCR 호출 횟수 절감*에서 나온다([4.4절](#44-그래서-rust의-진짜-자리)과 동일 결론). 또한 ort은 아직 API 안정화 전이라 rc 버전 변경에 약간의 마이그레이션 비용이 생길 수 있다(상세는 [ADR-6](#14-의사결정-기록-adr)).
-
----
-
-## 7. 핵심 API 설계 — trait OcrEngine
-
-핵심 질문: **검출(detection)과 인식(recognition)을 하나의 trait으로 묶을 것인가, 분리할 것인가?**
-
-결론: **분리하되, 합성 타입으로 묶는다.** 이유는 두 가지.
-
-1. 영상 파이프라인에서 검출과 인식의 *호출 빈도가 다르다.* 자막은 위치가 고정이라 검출을 캐시/스킵할 수 있고, 인식만 매번 돌리는 최적화가 가능하다. 한 trait으로 묶으면 이 분리 최적화가 막힌다.
-2. 백엔드마다 강점이 다르다(검출은 A, 인식은 B 조합). 분리해야 믹스앤매치된다.
+### Rust 라이브러리 (OCR)
 
 ```rust
-/// 한 프레임에서 텍스트 영역(박스)을 찾는다.
-pub trait TextDetector: Send + Sync {
-    fn detect(&self, frame: &Frame) -> Result<Vec<TextBox>>;
-}
+use rust_ocr_transformer::{Frame, OcrEngine, TractTextDetector, TractTextRecognizer};
 
-/// 잘라낸 텍스트 영역 이미지에서 문자열을 읽는다. 배치 입력으로 GPU 처리량 극대화.
-pub trait TextRecognizer: Send + Sync {
-    fn recognize(&self, crops: &[Crop]) -> Result<Vec<Recognized>>;
-}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 이미지 1장 로드 (영상은 프레임 스트림으로 같은 엔진에 흘린다)
+    let frame = Frame::from_path("page.png")?;
 
-/// 둘을 합성한 상위 엔진. Phase 1에서는 이것만 쓰고,
-/// Phase 2에서 detector/recognizer를 따로 제어해 최적화한다.
-pub struct OcrEngine<D: TextDetector, R: TextRecognizer> {
-    detector: D,
-    recognizer: R,
-}
+    // 검출 모델(입력 736x1280) + 인식 모델(입력 48x320) + 문자 사전
+    let detector = TractTextDetector::new("models/det.onnx", (736, 1280))?;
+    let recognizer = TractTextRecognizer::new("models/rec.onnx", "models/dict.txt", (48, 320))?;
+    let engine = OcrEngine::new(detector, recognizer);
 
-impl<D: TextDetector, R: TextRecognizer> OcrEngine<D, R> {
-    pub fn read(&self, frame: &Frame) -> Result<Vec<Recognized>> {
-        let boxes = self.detector.detect(frame)?;
-        let crops = crop_regions(frame, &boxes);
-        self.recognizer.recognize(&crops)
+    // 검출 → 크롭 → 인식
+    for r in engine.read(&frame)? {
+        println!("[{:.2}] ({},{}) {}", r.confidence, r.bbox.x, r.bbox.y, r.text);
     }
+    Ok(())
 }
 ```
 
-`Send + Sync` 바운드가 [8장 멀티스레드 파이프라인](#8-실시간-멀티스레드-파이프라인)에서 스레드 간 공유를 가능케 하는 핵심이다. 백엔드(oar-ocr / ocrs / rusto-rs)는 이 두 trait의 구현체로 들어온다 → [5.2절](#52-모듈-경계)의 "백엔드 교체 가능" 설계가 실현된다.
+모델·사전 파일을 받는 방법은 [11장](#11-모델-준비-onnx-모델사전)에 있다.
 
----
+### CLI
 
-## 8. 실시간 멀티스레드 파이프라인
-
-실시간 영상의 비결은 **단계를 스레드로 쪼개고 채널로 잇는 것**이다. 실시간 YOLO 웹캠 사례의 구조(캡처 스레드 → 전처리 스레드 → 추론 스레드 → 후처리 스레드)를 OCR에 맞게 변형한다.
-
-### 8.1 스레드 토폴로지
-
-```text
-[T1 캡처]        디코드한 프레임을 채널로 흘림 (image/ffmpeg)
-  ↓  bounded channel (백프레셔: 가득 차면 캡처가 자연히 대기)
-[T2 샘플링 게이트]   SSIM으로 직전 키프레임과 비교 → 변화 없으면 drop      (호출 80-90% 절감)
-  ↓  변화 프레임만 통과
-[T3 검출]        TextDetector::detect → 텍스트 박스
-  ↓
-[T4 인식]        TextRecognizer::recognize, 배치로 묶어 GPU 처리량 ↑
-  ↓  (frame_id, timestamp, text)
-[T5 시간축 병합]    Levenshtein 중복제거 + 타임스탬프 정렬 → 최종 스트림     (핵심 IP)
-  ↓
-출력: SRT / JSON / 평문  →  RAG 인제스트
+```bash
+cargo build --release --features cli
+./target/release/roct image page.png \
+  --det-model models/det.onnx --rec-model models/rec.onnx --dict models/dict.txt
 ```
 
-### 8.2 채널과 백프레셔
+### Python
 
-- 스레드 간 연결은 **bounded channel**(`crossbeam-channel` 또는 `tokio::sync::mpsc`)로 한다.
-- 버퍼가 가득 차면 상류가 자연히 블로킹/대기 → 메모리 폭주 없이 *백프레셔*가 작동.
-- Rust의 GC 없는 결정적 메모리 동작 덕에 프레임 버퍼 크기를 컴파일 타임 의도대로 통제할 수 있다(Python+GIL이 못 하는 지점).
+```python
+import json
+import rust_ocr_transformer as roct
 
-### 8.3 동기 vs 비동기
-
-- **CPU/GPU 바운드(추론)** — OS 스레드 + `crossbeam-channel`이 단순하고 빠르다.
-- **입출력 바운드(네트워크 스트림 입력)** — 입력단만 `tokio` async로, 추론단은 스레드 풀로 두는 하이브리드가 현실적.
-- 권장 — Phase 2는 전구간 동기 스레드로 시작 → 네트워크 스트림 요구가 생기면 입력단만 async화.
-
----
-
-## 9. 해자 1 — SSIM 샘플링 게이트
-
-이 프로젝트의 1번 해자. **모든 프레임을 OCR하지 않는다** — 직전 키프레임과 충분히 유사하면 버린다.
-
-```rust
-pub struct SamplingGate {
-    last_keyframe: Option<GrayImage>,
-    threshold: f64,        // 이 값보다 SSIM이 높으면 "동일"로 보고 스킵
-}
-
-impl SamplingGate {
-    /// true = 통과(새 프레임), false = 스킵(중복)
-    pub fn admit(&mut self, frame: &Frame) -> bool {
-        let gray = to_gray_downscaled(frame);   // 비교는 다운스케일로 충분
-        match &self.last_keyframe {
-            Some(prev) if ssim(prev, &gray) >= self.threshold => false,
-            _ => { self.last_keyframe = Some(gray); true }
-        }
-    }
-}
+# 이미지 OCR — 모델·사전 경로를 주면 인식 결과 JSON 반환
+out = roct.recognize_image("page.png", "models/det.onnx", "models/rec.onnx", "models/dict.txt")
+for r in json.loads(out):
+    print(r["confidence"], r["text"])
 ```
 
-### 9.1 임계값을 영상 종류별로 동적 조정
-
-자막·슬라이드·손글씨 화이트보드는 변화 패턴이 달라 단일 임계값이 안 맞는다. 휴리스틱:
-
-| 영상 종류 | 특성 | 임계값 전략 |
-|---|---|---|
-| 자막(영화/드라마) | 하단 좁은 영역만 변함 | 자막 관심영역(ROI)만 SSIM 계산 → 임계값 낮게(민감) |
-| 슬라이드/데모 | 장면 전체가 가끔 급변 | 전체 SSIM, 임계값 높게(둔감) + 장면전환 검출 보조 |
-| 손글씨 화이트보드 | 점진적 누적 변화 | 시간 윈도 기반 누적 변화량 + 주기 강제 샘플 |
-
-권장 구현: **ROI 자동 추정 + 적응형 임계값.** 첫 N프레임에서 "변하는 영역"을 학습해 ROI를 잡고, 그 영역의 변화 분산으로 임계값을 자동 보정한다. 정적 구간에서는 강제 최소 샘플링 주기(예: 2초)로 누락을 방지한다.
-
-> 효과: 30fps 영상에서 자막은 초당 수 프레임만 바뀌므로, 게이트 통과율을 한 자릿수 %까지 낮출 수 있다. 인식 호출이 10배 이상 줄면 그게 곧 "빠르다"의 정체다([5.3절](#53-빠르게의-정확한-의미)).
-
 ---
 
-## 10. 해자 2 — temporal 병합
+## 3. 설치와 Cargo Feature
 
-2번 해자. 게이트를 통과해도 인접 키프레임의 인식 결과는 거의 같은 텍스트일 수 있다(한 글자 흔들림 등). Levenshtein 편집거리로 "같은 자막의 연속"을 하나의 구간으로 합친다.
-
-```rust
-pub struct TemporalMerger {
-    open: Option<Segment>,   // 현재 누적 중인 자막 구간
-    sim_threshold: f64,      // 정규화 편집거리 유사도 임계값
-}
-
-impl TemporalMerger {
-    pub fn push(&mut self, t: Timestamp, text: &str) -> Option<Segment> {
-        match &mut self.open {
-            Some(seg) if norm_levenshtein(&seg.text, text) >= self.sim_threshold => {
-                seg.end = t;                            // 같은 자막 → 구간 연장
-                seg.text = longer_of(&seg.text, text);  // 더 완전한 인식본 채택
-                None
-            }
-            _ => {
-                let finished = self.open.take();        // 다른 자막 → 이전 구간 확정
-                self.open = Some(Segment::new(t, text));
-                finished
-            }
-        }
-    }
-}
-```
-
-### 10.1 출력 스키마
-
-`temporal`의 출력은 **(start, end, text)** 구간 리스트다. 이것이 SRT/JSON/평문의 공통 원천이다.
-
-```json
-{ "start": "00:01:12.300", "end": "00:01:15.800", "text": "고대의 봉인이 풀렸다" }
-```
-
-> [ADR-5](#14-의사결정-기록-adr)의 "통합 인제스트" 정합성: 이 구간 스키마를 문서 파서의 출력 스키마와 통일하면, 텍스트 입구와 비전 입구가 단일 인제스트 인터페이스로 합쳐진다([로드맵 Phase 3](#16-로드맵)).
-
----
-
-## 11. 성능 예산
-
-"실시간"을 숫자로 못 박는다. 목표를 정의해야 병목을 찾을 수 있다.
-
-| 지표 | 목표(데스크톱 GPU) | 목표(엣지 CPU) | 비고 |
-|---|---|---|---|
-| 입력 처리 | 30fps 디코드 무드랍 | 15fps | 게이트가 인식 부하를 흡수 |
-| 게이트 통과율 | 자막 5% 이하 | 5% 이하 | SSIM이 90% 이상 프레임 제거 |
-| 인식 레이턴시 | 50ms 미만 / 배치 | 200ms 미만 | 배치 크기로 처리량 조절 |
-| 메모리 | 300MB 미만 | 150MB 미만 | 단일 바이너리 + 모델 |
-| 콜드 스타트 | 1초 미만 | 1.5초 미만 | ort 모델 적재 포함 |
-
-### 11.1 처리량의 80%를 가르는 두 손잡이
-
-1. **게이트 통과율** — SSIM 임계값. 인식 호출 횟수를 직접 결정한다. 가장 큰 레버.
-2. **인식 배치 크기** — GPU는 배치로 먹여야 처리량이 산다. 게이트 통과 프레임의 크롭들을 모아 한 번에 `recognize`.
-
-### 11.2 측정 우선
-
-추측 최적화 금지. 각 스레드 구간에 타이머를 박고 `criterion` 벤치마크로 측정한 뒤 병목부터 손댄다. 대개 병목은 추론이 아니라 *디코드*거나 *크롭/리사이즈 전처리*인 경우가 많다.
-
----
-
-## 12. 빌드 전략 — A → B → C
-
-로드맵(Phase 1-5)을 "무엇을 코어로 정의하느냐" 관점에서 세 전략으로 재배열한다.
-
-### 전략 A · 오케스트레이터 (MVP 최단거리)
-
-- 기성 엔진(oar-ocr/ocrs)을 직접 호출, 가치는 `sampler` + `temporal`에만.
-- 산출물: 동작하는 영상 → SRT 데모. 2-3주.
-- 대응: Phase 1-2.
-
-### 전략 B · 통합 코어 (제품)
-
-- [7장](#7-핵심-api-설계--trait-ocrengine)의 `TextDetector`/`TextRecognizer` trait로 백엔드 추상화. 믹스앤매치 가능.
-- 이것이 "OpenCV 같은" 그림의 진짜 모습이자 통합 인제스트의 비전 팔 본체.
-- 대응: Phase 3-4.
-
-### 전략 C · 엣지 / WASM
-
-- ocrs+RTen 또는 ort 순수 Rust 런타임으로 C 의존성 제거. 온디바이스·브라우저·작은 바이너리.
-- 대응: Phase 5.
-
-> **권장 경로: B를 목표로 하되 A로 먼저 검증.** trait를 처음부터 박아두면 A가 B로 자연 성장한다. C는 모바일/브라우저 수요가 확인된 뒤 분기한다.
-
----
-
-## 13. Cargo.toml 의존성 초안
+`Cargo.toml`:
 
 ```toml
-[package]
-name = "rust-ocr-transformer"
-version = "0.1.0"
-edition = "2021"
-
 [dependencies]
-# 추론
-ort = "2.0.0-rc.10"          # ONNX Runtime 래퍼 (GPU/NPU 가속). 버전은 PoC 시 최신 rc 확인
-ndarray = "0.16"             # 텐서 입출력 가공
-
-# 이미지/영상
-image = "0.25"               # 디코드/그레이스케일/리사이즈
-imageproc = "0.25"           # SSIM 보조 연산
-# ffmpeg-next = "7"          # 영상 디코드 (Phase 2에서 활성화)
-
-# 시간축
-strsim = "0.11"              # Levenshtein/정규화 편집거리
-
-# 동시성
-crossbeam-channel = "0.5"    # 스레드 간 bounded 채널
-
-# 직렬화/CLI/에러
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-thiserror = "2"
-
-[features]
-default = ["cpu"]
-cpu = []
-cuda = ["ort/cuda"]          # NVIDIA GPU
-coreml = ["ort/coreml"]      # macOS/iOS
+rust_ocr_transformer = { git = "https://github.com/arabangoo/rust_ocr_transformer", tag = "v0.1.0" }
 ```
 
-> 버전은 작성 시점 기준 초안이다. PoC 첫 커밋에서 `cargo update` 후 실제 해석된 버전으로 고정한다. ort의 실행 공급자는 feature flag로 분리해 타깃별 빌드를 깔끔히 가른다.
+### Feature 목록
+
+| Feature | 활성화 대상 | 비고 |
+|---|---|---|
+| **`tract`** | 순수 Rust ONNX 추론 백엔드 | 기본 활성. C++ FFI 없음. `tract-onnx` |
+| `video` | 영상 디코드(Phase 2) | `ffmpeg-next` — 현재 자리만 잡힘, 미구현 |
+| **`cli`** | `roct` 실행 바이너리 | `clap` — 라이브러리 소비자에겐 새지 않는 opt-in |
+| **`python`** | PyO3 cdylib 바인딩 | `pyo3`(abi3) |
+
+```toml
+# default = ["tract"]   ← 순수 Rust 인식 백엔드 포함, zero FFI
+
+# 코어 IP(타입·trait·샘플링·병합·전후처리)만, 백엔드는 직접 주입하고 싶을 때
+rust_ocr_transformer = { version = "0.1", default-features = false }
+```
+
+> 기본(`tract`) 빌드는 외부 `.so/.dll` 이나 subprocess 를 요구하지 않는다. 속도·GPU 가 병목이면
+> 같은 trait 뒤에 들어오는 `ort`(ONNX Runtime, C++ FFI) 백엔드를 opt-in feature 로 추가할 계획이다
+> (현재 미구현 — 데드 feature 를 미리 만들지 않는다).
 
 ---
 
-## 14. 의사결정 기록 (ADR)
+## 4. 아키텍처
 
-아키텍처 결정 기록(Architecture Decision Record). 각 결정과 그 근거·대안을 남긴다.
+```text
+디코드 → 전처리 → 작업 모델(trait) → 후처리 → 구조화 출력
+ Frame   preprocess   tasks::*        postprocess   FrameAnalysis
+                       (모델 plug point)              + SRT/JSON/평문
+```
 
-### ADR-1 · 언어로 Rust를 선택
+핵심은 **작업 trait 레이어**다. 각 작업(검출·인식·분류·객체검출·레이아웃·세그멘테이션)은
+입력으로 공통 [`Frame`](#5-공통-타입-레퍼런스) 을 받고 작업별 결과 타입을 낸다. 모델은 그 trait 의
+구현체로 들어오므로, 코어 파이프라인은 어떤 모델을 쓰는지 모른 채 작업 단위로만 조립된다.
 
-- **결정** — 파이프라인 코어를 Rust로 작성.
-- **이유** — 단일 바이너리, GC 없는 예측 지연, GIL 없는 동시성, 엣지 배포.
-- **비채택 근거** — Python은 프로토타이핑엔 좋으나 프레임 버퍼·동시성·배포 풋프린트에서 불리.
-
-### ADR-2 · 영상 우선(Video-First)
-
-- **결정** — 이미지가 아니라 영상을 1급 시민으로.
-- **이유** — 러스트 이미지 OCR은 포화, 영상 파이프라인은 공백. 시간축이 차별점.
-
-### ADR-3 · 인식 모델은 만들지 않고 임베드
-
-- **결정** — 탐지/인식은 기성 크레이트·모델(PaddleOCR/PP-OCRv5)을 trait 뒤에 둔다.
-- **이유** — 모델 정확도는 우리가 발명할 영역이 아님. 재발명은 시간 낭비.
-- **결과** — 백엔드 교체 가능 설계 → 향후 더 좋은 모델로 무중단 갱신.
-
-### ADR-4 · "만능" 거부, 영상 자막/화면텍스트로 범위 축소
-
-- **결정** — 손글씨·수식·임의 장면텍스트 전방위 지원을 초기 목표에서 제외.
-- **이유** — 각각 독립 연구 분야. 좁혀야 완성도와 차별성이 산다.
-- **주의** — "한 파이프라인으로 이미지·영상을 처리한다"([5.5절](#55-이미지--영상의-1프레임--통합되는-것과-아닌-것))는 **입력 양식의 통합**이지 **인식 범위의 통합**이 아니다. 둘을 섞어 "모든 걸 읽는 만능"으로 확장하려는 순간 이 결정이 무너진다.
-
-### ADR-5 · 통합 인제스트 엔진의 비전 팔로 포지셔닝
-
-- **결정** — 단독 제품이 아니라 RAG 인제스트 파이프라인의 비전 입구로 설계.
-- **이유** — 기존 문서 파서(텍스트 입구)와 합쳐 "무엇이든 삼키는" 일관된 서사 형성.
-
-### ADR-6 · 추론 런타임으로 ort(ONNX Runtime) 채택
-
-- **결정** — 검출·인식 모델을 ONNX로 변환해 `ort`로 실행.
-- **이유** — [6장](#6-추론-스택-결정--ort--onnx)의 성능·하드웨어 추상화·모델 호환성. "만들지 말고 임베드" 원칙과 정합.
-- **대안 검토** — `candle`(순수 Rust, 코어 스택과 통일성은 높으나 OCR 모델 생태계 빈약), MNN(rusto-rs/ocr-rs가 채택, 모바일 강점) → 모바일 타깃 시 백엔드로 추가 검토.
-- **주의** — ort이 아직 API 안정화 전이라 rc 버전 변경에 약간의 마이그레이션 비용 발생 가능.
+- **디코드** — 이미지/영상을 [`Frame`](#5-공통-타입-레퍼런스) 으로. 이미지 = 프레임 1개 영상.
+- **전처리** — [`preprocess`](#63-전처리-preprocess): letterbox 리사이즈·정규화·NCHW 텐서화. 작업 무관 재사용.
+- **추론** — [`tasks`](#61-작업-trait) trait 뒤의 모델([`backends::tract`](#133-tract-백엔드-참고)).
+- **후처리** — [`postprocess`](#64-후처리-postprocess): 비최대 억제(NMS)·softmax·연결성 시계열 분류(CTC) 디코딩·DB 박스.
+- **출력** — [`FrameAnalysis`](#5-공통-타입-레퍼런스) 로 여러 작업 결과를 모으고, 영상은 [SRT/JSON](#8-영상-시간축-처리) 으로.
 
 ---
 
-## 15. 크레이트 비교
+## 5. 공통 타입 레퍼런스
 
-인식 백엔드 후보. trait로 추상화하므로 초기엔 하나를 고르고 후에 교체할 수 있다.
+`types` 모듈. 결과 타입은 `serde::{Serialize, Deserialize}` 를 구현해 그대로 JSON 으로 떨어뜨릴 수 있다.
 
-| 크레이트 | 기반 | 추론엔진 | 특징 | 적합도 |
-|---|---|---|---|---|
-| **oar-ocr** | PaddleOCR | ONNX (ort) | 레이아웃 분석·표 구조 인식까지 | 문서형 화면텍스트에 강함 |
-| **ocrs** | 자체 학습 | RTen | WASM 호환, 코드 단순, 라틴 위주(초기 프리뷰) | 브라우저/엣지 데모 |
-| **rusto-rs** | RapidOCR/PaddleOCR | MNN | OpenCV 의존 0, iOS/Android, 99.3% 정확도 일치 | 모바일·다국어 |
-| **ocr-rs** | PaddleOCR(PP-OCRv5) | MNN | 11개 이상 언어/100개 이상 커버, 손글씨·세로쓰기, GPU 백엔드 | 다국어·GPU 가속 |
+```rust
+/// 파이프라인 1단위. 이미지는 프레임이 1개인 영상의 퇴화 사례다.
+pub struct Frame {
+    pub image:     image::DynamicImage,
+    pub index:     u64,        // 영상 내 프레임 순번 (이미지면 0)
+    pub timestamp: Timestamp,  // 표시 시각(ms) (이미지면 0)
+}
+// Frame::from_path(p) / Frame::from_image(img) / Frame::new(img, index, ts)
 
-선택 기준: ① 대상 언어(한/영/다국어) ② 배포 타깃(서버/모바일/WASM) ③ GPU 가용성 ④ 표/레이아웃 필요 여부.
+/// 픽셀 좌표계 사각 영역(좌상단 원점).
+pub struct BBox { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
+```
 
----
+### 작업별 결과 타입
 
-## 16. 로드맵
+```rust
+pub struct TextBox     { pub bbox: BBox, pub confidence: f32 }                  // 검출
+pub struct Crop        { pub image: image::DynamicImage, pub bbox: BBox }       // 검출→인식 사이
+pub struct Recognized  { pub text: String, pub confidence: f32, pub bbox: BBox }// 인식
+pub struct Detection   { pub bbox: BBox, pub label: String, pub score: f32 }    // 객체 검출
+pub struct Classification { pub label: String, pub score: f32 }                 // 분류
+pub struct LayoutRegion { pub bbox: BBox, pub kind: String, pub score: f32 }    // 레이아웃
+pub struct Mask        { pub width: u32, pub height: u32, pub classes: Vec<u8> }// 세그멘테이션
 
-### Phase 0 · 기반 (설계 확정)
+/// 한 프레임의 종합 분석 결과 — 여러 작업 출력을 모으는 구조화 출력 컨테이너.
+pub struct FrameAnalysis {
+    pub recognized:      Vec<Recognized>,
+    pub detections:      Vec<Detection>,
+    pub classifications: Vec<Classification>,
+    pub layout:          Vec<LayoutRegion>,
+}
+```
 
-- 본 문서 확정, trait 인터페이스 스케치, 크레이트 PoC 1종 선택.
+### 영상 시간축 타입
 
-### Phase 1 · 이미지 MVP
-
-- 기성 크레이트 임베드 → 단일 이미지 OCR 동작.
-- 백엔드 추상화 trait 확정. CLI: `ocr image <path>`.
-
-### Phase 2 · 영상 시간축 레이어 (핵심)
-
-- 디코드 + SSIM 샘플러 + Levenshtein 중복제거 + SRT 출력.
-- CLI: `ocr video <path> --out subs.srt`. **여기서 진짜 차별점이 완성된다.**
-
-### Phase 3 · 통합 인제스트
-
-- 문서 파서와 공통 출력 스키마 정의 → 단일 인제스트 인터페이스.
-- 청킹·임베딩 어댑터로 텍스트/비전 입구 통합.
-
-### Phase 4 · RAG 연동
-
-- 코어 스택(qdrant/lancedb, tokenizers, candle)과 연결 → 질의응답.
-
-### Phase 5 · 엣지 단일 바이너리
-
-- GPU 없는 환경에서도 동작하는 경량 빌드, WASM 타깃 실험.
-
----
-
-## 17. 활용 시나리오
-
-### 컨설턴트 모드 (주력)
-
-- **규제·컴플라이언스 영상** — 화면 녹화·교육 영상에서 텍스트 추출·검색 인덱싱.
-- **CCTV/현장 영상** — 간판·번호판·계기판 등 화면 텍스트의 시계열 추출.
-- **화면 캡처 파이프라인** — 회의·데모 녹화에서 슬라이드/자막 텍스트를 타임스탬프와 함께 수집.
-- 음성 전사(STT)가 못 잡는 **화면상의 시각 텍스트**가 차별 가치.
-
-### 작가 모드 (부차)
-
-- **고서·필사본 스캔** — 신화 설정의 원천 텍스트를 디지털화해 로어 바이블에 편입.
-- **필름 스틸·삽화** — 분위기 레퍼런스 영상에서 자막/문구 추출.
-- 영상 OCR과의 연결은 약하므로, 작가 모드는 통합 RAG의 "작가 비서" 단계에서 본격화.
+```rust
+pub struct Timestamp(pub u64);   // 밀리초. to_srt() → "HH:MM:SS,mmm"
+pub struct Segment { pub start: Timestamp, pub end: Timestamp, pub text: String }
+```
 
 ---
 
-## 18. 생태계 내 위치와 통합 인제스트
+## 6. 공개 API 레퍼런스
 
-세 조각이 합쳐져 "무엇이든 삼키는 통합 인제스트 → RAG" 아키텍처를 이룬다. 본 프로젝트는 그 **비전 팔**이다.
+### 6.1 작업 trait
 
-- **텍스트 입구** — `rust_markdown_transformer` (기존 문서 파서: docx/pptx/xlsx/hwpx/pdf/html/markdown → Markdown)
-- **비전 입구** — `rust-ocr-transformer` (본 프로젝트: 이미지·영상 → 타임스탬프 텍스트)
-- **코어 스택** — `rust_ai_core_stack` (candle, qdrant, lancedb, tokenizers, llm 등)
+`tasks` 모듈. 모델을 꽂는 자리다. 모두 `Send + Sync`(멀티스레드 공유 가능).
 
-통합의 핵심은 **공통 출력 스키마**다. [10.1절](#101-출력-스키마)의 `(start, end, text)` 구간 스키마를 문서 파서의 출력과 통일하면, 텍스트 입구와 비전 입구가 단일 인제스트 인터페이스로 합쳐진다(Phase 3). 이후 청킹·임베딩 어댑터(`ingest` 모듈)가 코어 스택의 벡터 인덱스로 흘려보낸다(Phase 4).
+```rust
+pub trait TextDetector:   Send + Sync { fn detect(&self, frame: &Frame) -> Result<Vec<TextBox>>; }
+pub trait TextRecognizer: Send + Sync { fn recognize(&self, crops: &[Crop]) -> Result<Vec<Recognized>>; }
+pub trait ObjectDetector: Send + Sync { fn detect_objects(&self, frame: &Frame) -> Result<Vec<Detection>>; }
+pub trait Classifier:     Send + Sync { fn classify(&self, frame: &Frame) -> Result<Vec<Classification>>; }
+pub trait LayoutAnalyzer: Send + Sync { fn analyze_layout(&self, frame: &Frame) -> Result<Vec<LayoutRegion>>; }
+pub trait Segmenter:      Send + Sync { fn segment(&self, frame: &Frame) -> Result<Mask>; }
+```
+
+### 6.2 OcrEngine — OCR 작업 합성
+
+검출기 + 인식기를 합성한 OCR 파이프라인. 다른 작업은 각자의 trait 으로 직접 조립한다.
+
+```rust
+OcrEngine::new(detector: D, recognizer: R) -> OcrEngine<D, R>   // D: TextDetector, R: TextRecognizer
+fn read(&self, frame: &Frame) -> Result<Vec<Recognized>>        // 검출 → 크롭 → 인식
+fn detector(&self) -> &D
+fn recognizer(&self) -> &R
+
+// 헬퍼: 검출 박스대로 프레임을 잘라 Crop 목록 생성
+crop_regions(frame: &Frame, boxes: &[TextBox]) -> Vec<Crop>
+```
+
+### 6.3 전처리 (`preprocess`)
+
+작업 무관 재사용 함수. 이미지를 모델 입력 텐서(NCHW f32)로.
+
+```rust
+pub const IMAGENET_MEAN: [f32; 3];  // [0.485, 0.456, 0.406]
+pub const IMAGENET_STD:  [f32; 3];  // [0.229, 0.224, 0.225]
+
+// letterbox(비율 유지+패딩) + 채널별 정규화 → (data[3*h*w], scale). scale 은 박스 역매핑용.
+fn letterbox_chw(img: &DynamicImage, in_h: usize, in_w: usize, mean: [f32;3], std: [f32;3]) -> (Vec<f32>, f32)
+
+// 높이 고정·비율 유지, 폭 우측 0-pad, [-1,1] 정규화 → NCHW (텍스트 인식용)
+fn fixed_height_chw(img: &DynamicImage, in_h: usize, in_w: usize) -> Vec<f32>
+```
+
+### 6.4 후처리 (`postprocess`)
+
+모델 무관 순수 로직은 단위 테스트로 검증돼 있다.
+
+```rust
+fn softmax(logits: &[f32]) -> Vec<f32>            // 수치 안정 softmax
+fn argmax(v: &[f32]) -> (usize, f32)              // top-1 (인덱스, 값)
+fn iou(a: &BBox, b: &BBox) -> f32                 // 교집합/합집합
+fn nms(boxes: &[(BBox, f32)], iou_threshold: f32) -> Vec<usize>   // 비최대 억제 → 유지 인덱스
+fn ctc_greedy_decode(logits: &[f32], t: usize, c: usize, dict: &[String]) -> (String, f32)  // CTC
+fn connected_boxes(prob: &[f32], w: usize, h: usize, threshold: f32, min_area: usize)
+    -> Vec<(usize, usize, usize, usize, f32)>     // DB 검출 후처리(연결요소 박스)
+```
+
+### 6.5 에러 타입
+
+```rust
+pub enum VisionError {
+    Io(std::io::Error),
+    Decode(String),       // 이미지/영상 디코드 실패
+    Backend(String),      // 모델 로드/추론 에러 (구체 백엔드 에러를 문자열로 흡수)
+    NotWired(&'static str),// 아직 연결 안 된 기능 호출
+    Unsupported(String),
+}
+pub type OcrError = VisionError;          // 구 명칭 호환 별칭
+pub type Result<T> = std::result::Result<T, VisionError>;
+```
+
+> 에러 타입은 optional 의존성(`tract` 등)에 의존하지 않는다. 백엔드 구체 에러는 문자열로 흡수하므로
+> 어떤 feature 조합에서도 항상 컴파일된다.
 
 ---
 
-## 19. 상태와 다음 행동
+## 7. 작업별 동작과 성숙도
 
-**상태: 설계 단계(Design phase).** 구현 전, 본 문서로 서사와 아키텍처를 확정한다.
+| 작업 | trait / 백엔드 | 상태 |
+|---|---|---|
+| 텍스트 검출 + 인식(OCR) | `TextDetector`/`TextRecognizer`, `TractTextDetector`/`TractTextRecognizer`, `OcrEngine` | **동작 검증됨** — PP-OCRv5 한국어 모델로 CPU end-to-end 실행 확인 |
+| 이미지 분류 | `Classifier`, `TractClassifier` | 컴파일·구조 완성, **실모델 정확도 미검증** |
+| 객체 검출 | `ObjectDetector`, `TractObjectDetector` | 컴파일됨. **출력 레이아웃을 `[N,6]`=(x1,y1,x2,y2,score,cls)로 가정** — 모델마다 다르니 검증·교체 필요 |
+| 레이아웃 분석 | `LayoutAnalyzer` | **trait 정의만**(레이아웃 라벨을 가진 객체 검출의 특수형) |
+| 세그멘테이션 | `Segmenter`, `Mask` | **trait 정의만**(구체 백엔드 미구현) |
+| 영상 시간축 | `SamplingGate`, `TemporalMerger` | 동작·테스트 완료 ([8장](#8-영상-시간축-처리)). 단 영상 **디코드는 미구현**(Phase 2) |
 
-### 다음 행동
+검증·한계 메모:
 
-1. **PoC 백엔드 1종 선택** — 한국어 자막이 1차 타깃이면 다국어 강한 `ocr-rs`(PP-OCRv5/MNN) 또는 `oar-ocr`(ort) 중 택1.
-2. **trait 골격 커밋** — `TextDetector`/`TextRecognizer`/`OcrEngine`만 먼저(빈 구현 + 단일 이미지 테스트).
-3. **SSIM 게이트 단독 테스트** — 샘플 영상으로 통과율 측정, 임계값 감 잡기.
-4. **temporal 병합 단독 테스트** — 인접 프레임 인식 결과 중복제거 확인.
-5. **파이프라인 결선** — 채널로 잇고 영상 → SRT 끝까지 한 번 통과.
-
-각 단계는 독립 테스트가 가능하도록 잘라 두었다. 1·3·4는 병렬로 진행해도 충돌이 없다. PoC 착수 후 실측 수치가 나오면 [11장 성능 예산](#11-성능-예산)을 갱신한다.
-
----
-
-## 20. 참고 출처
-
-- ort (ONNX Runtime for Rust) — https://github.com/pykeio/ort , https://lib.rs/crates/ort
-- ort 성능·하드웨어 가속 정리 — https://www.prismnews.com/hobbies/rust-programming/rust-developers-can-now-run-bert-yolo-and-llama-via-onnx
-- ocrs (순수 Rust OCR, RTen/WASM) — https://github.com/robertknight/ocrs
-- retto (PaddleOCR ONNX 추론, Desktop/WASM) — ort 채택 사례
-- 실시간 YOLO 웹캠 파이프라인(스레드 토폴로지 참고) — https://medium.com/@alfred.weirich/rust-ort-onnx-real-time-yolo-on-a-live-webcam-part-2-d74efc01bae0
-- PaddleOCR → ONNX 변환/GPU 추론 — https://github.com/PaddlePaddle/PaddleOCR/discussions/14572
+- **OCR 정확도는 사전(dict) 정합에 민감하다.** 인식 모델의 클래스 인덱스와 문자 사전이 1:1로 맞아야
+  한다. 모델에 딸린 전용 사전을 써야 하며, 다른 사전을 물리면 글자가 통째로 어긋난다(중국어 사전을
+  한국어 모델에 물리면 한글이 한자로 나오는 식). [11장](#11-모델-준비-onnx-모델사전) 참고.
+- **검출 박스는 축 정렬**이다(회전·unclip 미적용). 수평 자막·화면텍스트엔 충분하나 기울어진 텍스트는
+  후속 고도화 대상이다.
+- **고정 입력 형상.** 검출/인식 입력을 빌드 시 고정(예: 검출 736x1280, 인식 48x320)해 가변 형상
+  재최적화를 피한다. 매우 넓은 줄은 인식 폭(예: 320px)으로 잘릴 수 있다.
+- **동적 입력 ONNX 처리.** PaddleOCR ONNX 는 입력이 동적 차원이라, 백엔드가 로드 시 원시 proto 의
+  입력 차원을 정적으로 고정한 뒤 파싱한다. tract 는 검출(DB)·인식(CRNN/SVTR) 모두 실행 가능함을 확인했다.
 
 ---
 
-*이 문서는 흩어져 있던 설계 노트(00-background · guide_01 · guide_02)를 하나로 통합한 단일 개발자 설계 문서다. PoC가 진전되면 성능 예산(11장)과 빌드 전략(12장)을 실측 기반으로 갱신한다.*
+## 8. 영상 시간축 처리
+
+영상에서 텍스트를 뽑을 때의 차별점 — 모든 프레임을 인식하지 않고, 변화가 있는 프레임만 인식한 뒤
+인접 프레임의 중복을 시간 구간으로 병합한다.
+
+### 8.1 SSIM 샘플링 게이트
+
+직전 키프레임과 구조적 유사도(SSIM)가 충분히 높으면 프레임을 버린다. 30fps 영상에서 자막은 초당 수
+프레임만 바뀌므로, 통과율을 한 자릿수 %까지 낮춰 인식 호출 자체를 줄인다.
+
+```rust
+let mut gate = SamplingGate::new(0.98);        // 임계값(높을수록 덜 버림). with_scale 로 비교 크기 조정
+if gate.admit(&frame) {                        // true=통과(새 프레임), false=스킵(직전과 동일)
+    // 이 프레임만 OCR
+}
+ssim(&gray_a, &gray_b) -> f64                  // 두 그레이스케일 이미지의 전역 SSIM
+```
+
+### 8.2 temporal 병합
+
+게이트를 통과한 인접 프레임의 인식 결과는 거의 같은 텍스트일 수 있다. 정규화 Levenshtein 유사도로
+"같은 자막의 연속"을 하나의 `(start, end, text)` 구간으로 합친다.
+
+```rust
+let mut merger = TemporalMerger::new(0.8);     // 유사도 임계값
+if let Some(seg) = merger.push(timestamp, text) { /* 자막이 바뀜 → 직전 구간 확정 */ }
+let last = merger.finish();                     // 스트림 끝 → 마지막 구간 회수
+```
+
+### 8.3 출력 직렬화 (`emit`)
+
+```rust
+emit::to_srt(&segments)  -> String          // SRT 자막
+emit::to_json(&segments) -> Result<String>  // JSON 배열(타임스탬프 ms)
+emit::to_plain(&segments)-> String          // 텍스트만 줄바꿈 연결
+```
+
+---
+
+## 9. CLI 도구 (`roct`)
+
+`--features cli` 로 빌드된다.
+
+```bash
+cargo build --release --features cli
+```
+
+| 서브커맨드 | 인자 | 동작 |
+|---|---|---|
+| `image` | `<path>` `--det-model` `--rec-model` `--dict` | 이미지 OCR(검출+인식). 결과를 `[score] (x,y,w,h) text` 로 출력 |
+| `classify` | `<path>` `--model` `--labels` | 이미지 분류(top-k) |
+| `ssim` | `<a> <b>` | 두 이미지의 구조적 유사도 출력(샘플링 게이트 지표) |
+| `srt` | `<segments.json>` | 시간 구간 JSON → SRT 자막(stdout) |
+| `video` | `<path>` | 영상 OCR — Phase 2, 현재 `NotWired` 에러 반환 |
+
+```bash
+# 이미지 OCR
+roct image page.png --det-model models/det.onnx --rec-model models/rec.onnx --dict models/dict.txt
+
+# 이미지 분류 (모델 + 라벨 목록)
+roct classify cat.jpg --model models/cls.onnx --labels models/imagenet.txt
+
+# 구간 JSON → SRT
+roct srt segments.json > out.srt
+```
+
+---
+
+## 10. Python 바인딩 (PyO3)
+
+**abi3(stable ABI)** 로 빌드되어 Python 3.9+ 단일 휠로 호환된다(C++ 런타임 의존 없는 순수 Rust 휠).
+
+Python 에서 이미지 OCR(`recognize_image`)과 코어 유틸리티를 호출한다. 모델·사전 파일은 호출자가
+제공한다([11장](#11-모델-준비-onnx-모델사전)). 영상 처리(`read_video`)는 영상 디코드(Phase 2)와 함께 추가된다.
+
+### 설치
+
+```bash
+# PyPI 게시 후 — Rust 툴체인 불필요
+pip install rust_ocr_transformer
+
+# 소스에서(최신 main / 게시 전) — 설치 머신에 Rust 툴체인 필요
+pip install "git+https://github.com/arabangoo/rust_ocr_transformer"
+```
+
+### API
+
+```python
+import json
+import rust_ocr_transformer as roct
+
+roct.__version__                              # "0.1.0"
+
+# 이미지 OCR — 검출+인식 결과를 JSON 문자열로
+out = roct.recognize_image("page.png", "models/det.onnx", "models/rec.onnx", "models/dict.txt")
+for r in json.loads(out):
+    print(r["confidence"], r["text"], r["bbox"])   # {"x":..,"y":..,"width":..,"height":..}
+
+# 코어 유틸리티
+roct.image_ssim("a.png", "b.png")             # 두 이미지의 구조적 유사도(0.0-1.0)
+roct.segments_to_srt(segments_json)           # 시간 구간 JSON 문자열 → SRT 자막 문자열
+```
+
+`recognize_image` 는 입력 형상 인자(`det_height`/`det_width`/`rec_height`/`rec_width`)를 선택적으로 받는다(기본 PP-OCRv5 권장값).
+
+### 빌드 (개발자 · 게시자)
+
+루트 `pyproject.toml`(maturin 백엔드)이 빌드 메타데이터를 제공한다. `[tool.maturin] features = ["python"]`
+덕분에 `--features python` 을 생략해도 된다.
+
+```bash
+pip install maturin
+maturin develop --release          # 현재 venv 에 설치
+maturin build --release            # target/wheels/ 에 휠 빌드
+```
+
+---
+
+## 11. 모델 준비 (ONNX 모델·사전)
+
+이 프레임워크는 모델을 담지 않는다 — 추론에는 ONNX 모델 파일과(인식의 경우) 문자 사전이 필요하다.
+모델 가중치는 레포에 커밋하지 않는다(`.gitignore` 가 `*.onnx` 와 `models/` 를 제외).
+
+### PaddleOCR ONNX 모델 (검증에 사용한 출처)
+
+사전 변환된 PP-OCR ONNX 모델과 사전을 직접 받을 수 있다(PaddlePaddle, Apache-2.0).
+
+```bash
+mkdir -p models
+base="https://github.com/GreatV/oar-ocr/releases/download/v0.3.0"
+# 검출(언어 무관)
+curl -sL -o models/det.onnx       "$base/pp-ocrv5_mobile_det.onnx"
+# 인식(언어별) — 예: 한국어 PP-OCRv5
+curl -sL -o models/rec.onnx       "$base/korean_pp-ocrv5_mobile_rec.onnx"
+# 문자 사전 — 반드시 인식 모델과 짝이 맞는 것
+curl -sL -o models/dict.txt       "$base/ppocrv5_korean_dict.txt"
+```
+
+영어·라틴·일본어 등 다른 언어 인식 모델과 그에 맞는 사전도 같은 릴리스에 있다.
+
+> **사전은 모델과 정확히 짝이 맞아야 한다.** 인식 모델의 출력 클래스 수와 사전 길이·문자 순서가 1:1로
+> 대응해야 정상 인식된다. 같은 언어라도 모델 버전(v3/v4/v5)에 따라 사전이 다르므로, 모델과 함께 배포된
+> 전용 사전을 쓴다. 사전이 어긋나면 글자가 통째로 잘못 매핑된다.
+
+### 입력 형상
+
+백엔드 생성 시 입력 형상을 지정한다(PP-OCRv5 권장값): 검출 `(736, 1280)`, 인식 `(48, 320)`, 분류 `(224, 224)`.
+모델은 동적 입력이어도 백엔드가 이 형상으로 고정해 적재한다.
+
+---
+
+## 12. 서비스 파이프라인에 붙이기
+
+이 라이브러리는 단독 앱이 아니라 비전 입력 단에 박아 넣는 코어 의존성이다. 추출된 구조화 결과(텍스트·
+박스·구간)는 그 자체로 쓰거나, 검색 증강 생성(RAG) 인제스트의 비전 입구로 흘려보낸다.
+
+### 12.1 Rust 서비스에 임베드
+
+추론은 CPU 바운드이므로 async 서버(axum/actix)에서는 `spawn_blocking` 으로 감싼다. 모델은 한 번
+로드해 재사용한다(엔진을 `Arc` 로 공유 — trait 이 `Send + Sync`).
+
+```rust
+use std::sync::Arc;
+use rust_ocr_transformer::{Frame, OcrEngine, TractTextDetector, TractTextRecognizer};
+
+// 기동 시 1회 로드 후 공유
+let engine = Arc::new(OcrEngine::new(
+    TractTextDetector::new("models/det.onnx", (736, 1280))?,
+    TractTextRecognizer::new("models/rec.onnx", "models/dict.txt", (48, 320))?,
+));
+
+// 핸들러
+let eng = engine.clone();
+let results = tokio::task::spawn_blocking(move || {
+    let frame = Frame::from_path("upload.png")?;
+    eng.read(&frame)
+}).await??;
+```
+
+### 12.2 영상 → 자막(SRT) 파이프라인
+
+SSIM 게이트로 프레임을 솎고, 통과 프레임만 OCR 한 뒤 temporal 병합으로 자막 구간을 만든다.
+
+```rust
+use rust_ocr_transformer::{SamplingGate, TemporalMerger, emit};
+
+let mut gate = SamplingGate::new(0.98);
+let mut merger = TemporalMerger::new(0.85);
+let mut segments = Vec::new();
+
+for frame in frames {                       // 영상 디코드는 호출자 측(Phase 2 전까지)
+    if !gate.admit(&frame) { continue; }    // 변화 없는 프레임 스킵
+    let text = engine.read(&frame)?
+        .iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
+    if let Some(seg) = merger.push(frame.timestamp, &text) { segments.push(seg); }
+}
+if let Some(seg) = merger.finish() { segments.push(seg); }
+std::fs::write("out.srt", emit::to_srt(&segments))?;
+```
+
+### 12.3 타 언어 / 배치 — CLI 래핑
+
+Python·Rust 가 아닌 스택이나 배치 잡에서는 `roct` 바이너리를 subprocess 로 호출한다. 단일 정적
+바이너리라 컨테이너에 `roct` 하나만 넣으면 된다(런타임 의존 없음).
+
+```bash
+roct image /data/page.png --det-model det.onnx --rec-model rec.onnx --dict dict.txt
+```
+
+---
+
+## 13. 새 작업·백엔드 추가하기
+
+코어를 건드리지 않고 새 모델·새 작업을 끼울 수 있다.
+
+### 13.1 새 백엔드 — 기존 작업 trait 구현
+
+예: 자체 분류 모델을 `Classifier` 로. 공용 [`TractModel`](#64-tract-백엔드) 러너 + 재사용 전·후처리를 쓰면 짧다.
+
+```rust
+use rust_ocr_transformer::{Classifier, Classification, Frame, Result, TractModel};
+use rust_ocr_transformer::{preprocess, postprocess};
+
+struct MyClassifier { model: TractModel, labels: Vec<String> }
+
+impl Classifier for MyClassifier {
+    fn classify(&self, frame: &Frame) -> Result<Vec<Classification>> {
+        let (h, w) = self.model.dims();
+        let (data, _) = preprocess::letterbox_chw(&frame.image, h, w,
+            preprocess::IMAGENET_MEAN, preprocess::IMAGENET_STD);
+        let (logits, _) = self.model.run(data)?;
+        let probs = postprocess::softmax(&logits);
+        let (i, score) = postprocess::argmax(&probs);
+        Ok(vec![Classification { label: self.labels[i].clone(), score }])
+    }
+}
+```
+
+### 13.2 새 작업 — 새 trait
+
+기존 6개로 표현 안 되는 작업(예: 키포인트·깊이 추정)은 `tasks` 패턴대로 `Send + Sync` trait 을 새로
+정의하고 `Frame` 을 입력으로 받게 만든다. 전·후처리는 `preprocess`/`postprocess` 의 재사용 함수를 쓴다.
+
+### 13.3 tract 백엔드 (참고)
+
+`backends::tract` 가 제공하는 것:
+
+```rust
+TractModel::load(path, in_h, in_w) -> Result<TractModel>   // 동적 입력도 정적 고정 후 적재
+fn dims(&self) -> (usize, usize)
+fn run(&self, data: Vec<f32>) -> Result<(Vec<f32>, Vec<usize>)>  // (출력 슬라이스, 형상)
+
+TractTextDetector::new(model, (h, w))            // .with_threshold(f32)
+TractTextRecognizer::new(model, dict, (h, w))
+TractClassifier::new(model, labels, (h, w))      // .with_top_k(usize)
+TractObjectDetector::new(model, labels, (h, w))  // .with_thresholds(score, iou)
+```
+
+---
+
+## 14. 빌드 · Feature 조합 · 테스트
+
+이 저장소를 clone 한 경우, 쓰려면 **Rust 툴체인(stable, 1.74 이상 권장)** 으로 한 번 빌드해야 한다.
+
+| 쓰는 방식 | 빌드 명령 | 결과물 |
+|---|---|---|
+| CLI 도구 | `cargo build --release --features cli` | `target/release/roct` 단일 바이너리 |
+| Python 모듈 | `pip install maturin && maturin develop --release` | 현재 venv 에 `import rust_ocr_transformer` |
+| Rust 라이브러리 | `Cargo.toml` 에 `path`/`git` 의존성 | 다른 Rust 프로젝트에 링크 |
+
+```bash
+# 기본: 순수 Rust(tract) 백엔드 포함, zero FFI
+cargo build --release
+
+# 코어 IP 만 (백엔드 직접 주입)
+cargo build --release --no-default-features
+
+# CLI / Python
+cargo build --release --features cli
+maturin develop --release
+
+# 테스트 / 린트
+cargo test                  # 후처리 순수 로직(softmax·argmax·IoU·NMS·CTC) + 파이프라인 통합
+cargo clippy --all-targets
+```
+
+테스트는 외부 모델 없이 동작하는 범위를 검증한다 — 합성 이미지로 SSIM 게이트·temporal 병합·SRT
+출력·trait 합성 엔진 결선을, 합성 텐서로 NMS·softmax·CTC·IoU 후처리를 결정적으로 확인한다
+(`tests/pipeline.rs`, `src/postprocess.rs` 단위 테스트).
+
+---
+
+## 15. 디렉토리 구조
+
+```text
+rust_ocr_transformer/
+  Cargo.toml
+  README.md              # 이 문서
+  LICENSE                # Apache-2.0
+  src/
+    lib.rs               # 크레이트 루트 · re-export
+    types.rs             # 공통 타입(Frame/BBox/결과 타입/FrameAnalysis/Segment)
+    tasks.rs             # 작업 trait(TextDetector/Recognizer/ObjectDetector/Classifier/...)
+    engine.rs            # OcrEngine(검출+인식 합성) · crop_regions
+    preprocess.rs        # letterbox · 정규화 · CHW 텐서화
+    postprocess.rs       # NMS · softmax · argmax · IoU · CTC · DB 연결요소 박스 (+ 단위 테스트)
+    sampler.rs           # SSIM 샘플링 게이트(영상)
+    temporal.rs          # temporal 병합(영상)
+    emit.rs              # SRT / JSON / 평문 직렬화
+    error.rs             # VisionError / Result
+    python.rs            # PyO3 바인딩 (feature = "python")
+    bin/
+      roct.rs            # CLI 바이너리 (feature = "cli")
+    backends/
+      mod.rs             # feature 게이트
+      tract.rs           # 순수 Rust 추론 백엔드 (feature = "tract")
+  tests/
+    pipeline.rs          # 합성 픽스처 기반 통합 테스트
+```
+
+---
+
+## 16. 라이선스
+
+Apache-2.0

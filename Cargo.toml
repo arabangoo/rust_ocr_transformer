@@ -1,0 +1,72 @@
+[package]
+name         = "rust_ocr_transformer"
+version      = "0.1.0"
+edition      = "2021"
+license      = "Apache-2.0"
+description  = "Video-first Rust OCR pipeline — smart frame sampling (SSIM) + temporal dedup, emitting timestamped text/SRT for RAG ingestion. Recognition backends are embedded behind traits, not reinvented."
+repository   = "https://github.com/arabangoo/rust_ocr_transformer"
+readme       = "README.md"
+keywords     = ["ocr", "video", "subtitle", "onnx", "rag"]
+categories   = ["computer-vision", "multimedia::video"]
+
+# ── 설계 정합성(README ADR-3·ADR-7) ──────────────────────────────
+# default 빌드 = pure-Rust 코어 IP(샘플링·시간축 병합·출력)만. zero FFI.
+# 인식 백엔드(ort/ONNX)는 명시 opt-in(`onnx`)일 때만 C++ 런타임을 끌어온다.
+# LLM 은 코어 의존성이 아니다 — trait 경계 밖 옵셔널 후처리로만 존재(ADR-7).
+
+[lib]
+name       = "rust_ocr_transformer"
+# rlib: 일반 Rust 라이브러리/CLI/테스트용, cdylib: Python(PyO3) 확장 모듈용
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# 기본 = 순수 Rust 인식 백엔드(tract). zero FFI — rust_markdown_transformer 와 동일 원칙
+# ("pure-Rust 기본, FFI 는 명시 opt-in"). 코어 IP(타입·trait·게이트·병합·출력)는 항상 빌드.
+default = ["tract"]
+
+# 순수 Rust ONNX 추론(tract). 검출/인식 모델을 C++ FFI 없이 돌린다.
+# DB 검출 후처리·CTC 디코딩·전처리는 우리가 구현(이게 우리 시스템 IP).
+tract   = ["dep:tract-onnx"]
+
+# (예약) 속도·GPU 가 필요할 때의 opt-in FFI 백엔드 — ONNX Runtime(C++) 링크.
+#  순수 Rust 가 아니므로 명시 opt-in 일 때만. 아직 미구현 — 다음 단계에서 feature 와
+#  코드를 함께 추가한다(데드 feature 를 미리 만들지 않는다).
+# ort   = ["dep:ort"]
+
+# 영상 디코드 — ffmpeg 바인딩. (Phase 2 에서 활성화 예정.)
+video   = ["dep:ffmpeg-next"]
+
+# CLI 바이너리(roct) — 라이브러리 소비자에겐 새지 않도록 opt-in.
+cli     = ["dep:clap"]
+
+# Python 바인딩(cdylib) — `maturin develop --features python`.
+python  = ["dep:pyo3"]
+
+[dependencies]
+# ── pure-Rust 코어 (FFI 없음, 항상 빌드) ──
+thiserror  = "2"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+image      = "0.25"          # 디코드/그레이스케일/리사이즈 — Frame 구성과 SSIM 다운스케일
+strsim     = "0.11"          # 정규화 Levenshtein — temporal 병합 유사도
+
+# ── 인식 백엔드 (feature = "tract") — 순수 Rust ONNX 추론, FFI 없음 ──
+# tract-onnx: PaddleOCR det/rec ONNX 모델을 순수 Rust 로 추론. C++ ONNX Runtime 불필요.
+tract-onnx = { version = "0.21", optional = true }
+
+# ── 영상 디코드 (feature = "video", Phase 2) ──
+ffmpeg-next = { version = "7", optional = true }
+
+# ── CLI (feature = "cli") ──
+clap       = { version = "4", optional = true, features = ["derive"] }
+
+# ── Python 바인딩 (feature = "python") — abi3 stable ABI ──
+pyo3       = { version = "0.24", optional = true, features = ["extension-module", "abi3-py39"] }
+
+[[bin]]
+name              = "roct"
+path              = "src/bin/roct.rs"
+required-features = ["cli"]
+
+[dev-dependencies]
+image = "0.25"   # 테스트에서 합성 프레임 생성용 (런타임 dep 와 동일 버전, dedup)
