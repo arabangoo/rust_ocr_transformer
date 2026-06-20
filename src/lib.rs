@@ -5,8 +5,10 @@
 //! [`tasks`] 의 trait 뒤에 꽂아 교체하는 **오케스트레이션 틀**이다.
 //!
 //! ## 작업(task)과 현재 상태
-//! - 텍스트 검출/인식(OCR) — [`TextDetector`]/[`TextRecognizer`], [`OcrEngine`]: 골격 + tract 백엔드(추론 미검증)
-//! - 이미지 분류 — [`Classifier`]: tract 백엔드(추론 미검증)
+//! - 텍스트 검출/인식(OCR) — [`TextDetector`]/[`TextRecognizer`], [`OcrEngine`]: 실모델 동작
+//!   검증됨(PP-OCRv5 한·영·일 등 실제 화면 사진으로 확인). DB unclip·XY-Cut 읽기순서·자동
+//!   방향 보정([`recognize_image_auto`]) 포함
+//! - 이미지 분류 — [`Classifier`]: tract 백엔드(컴파일됨, 실모델 정확도 미검증)
 //! - 객체 검출 — [`ObjectDetector`]: tract 백엔드(출력 레이아웃 가정, 미검증)
 //! - 레이아웃 분석 — [`LayoutAnalyzer`]: trait 정의(레이아웃 라벨을 가진 객체 검출의 특수형)
 //! - 세그멘테이션 — [`Segmenter`]: trait 정의(구체 백엔드 미구현)
