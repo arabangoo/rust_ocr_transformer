@@ -521,6 +521,42 @@ curl -sL -o models/det_mobile.onnx "$base/detection/v3/det.onnx"
 > 별도 NFC 정규화가 필요 없다(실측 확인). 검출은 server(v5, 약 88MB)가 정확하나 적재가 느리고,
 > mobile(v3, 약 2.4MB)은 빠르나 단어 분할·정확도가 다소 낮다.
 
+### 다국어 인식 (언어별 모델·사전)
+
+검출(det)·방향(doc-ori) 모델은 언어 무관 공용이고, 인식(rec)·사전(dict)만 언어별로 바꾼다. 같은
+출처에서 주요 언어 모델·사전을 한꺼번에 받을 수 있다.
+
+```bash
+base="https://huggingface.co/monkt/paddleocr-onnx/resolve/main"
+for L in arabic chinese english eslav greek hindi korean latin tamil telugu thai; do
+  mkdir -p models/langs/$L
+  curl -sL -o models/langs/$L/rec.onnx  "$base/languages/$L/rec.onnx"
+  curl -sL -o models/langs/$L/dict.txt  "$base/languages/$L/dict.txt"
+done
+```
+
+| 언어 | 폴더 | 비고 |
+|---|---|---|
+| 중국어·일본어(CJK) | `chinese` | 한자(약 15,500) + 가나(히라가나·가타카나) 포함 — 일본어도 이 모델로 인식(실측: こんにちは世界·東京タワー·日本語認識テスト 정확). server급(약 80MB) |
+| 영어 | `english` | 라틴 영숫자·기호 |
+| 한국어 | `korean` | 완성형 한글 출력 |
+| 라틴(유럽어) | `latin` | 프랑스·독일·스페인 등 라틴 문자권 |
+| 그 외 | `arabic` · `eslav`(키릴) · `greek` · `hindi` · `tamil` · `telugu` · `thai` | 각 문자권 |
+
+언어 전환은 인식 모델·사전 경로만 바꾸면 된다(검출 모델은 그대로):
+
+```bash
+# 일본어 (CJK 모델 — 한자 + 가나)
+roct image jp.png --det-model models/det.onnx \
+  --rec-model models/langs/chinese/rec.onnx --dict models/langs/chinese/dict.txt --auto-rotate
+
+# 영어
+roct image en.png --det-model models/det.onnx \
+  --rec-model models/langs/english/rec.onnx --dict models/langs/english/dict.txt
+```
+
+> 일본어는 PP-OCRv5 에서 별도 모델이 아니라 CJK 범용(`chinese`) 모델이 한자·가나를 함께 처리한다.
+
 > **사전은 모델과 정확히 짝이 맞아야 한다.** 인식 모델의 출력 클래스 수와 사전 길이·문자 순서가 1:1로
 > 대응해야 정상 인식된다. 같은 언어라도 모델 버전(v3/v4/v5)에 따라 사전이 다르므로, 모델과 함께 배포된
 > 전용 사전을 쓴다. 사전이 어긋나면 글자가 통째로 잘못 매핑된다.
