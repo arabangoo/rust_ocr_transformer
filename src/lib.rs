@@ -58,6 +58,6 @@ pub use types::{
 // 순수 Rust 추론 백엔드(tract) — feature 활성 시 노출.
 #[cfg(feature = "tract")]
 pub use backends::tract::{
-    TractClassifier, TractDocOrientation, TractModel, TractObjectDetector, TractTextDetector,
-    TractTextRecognizer,
+    recognize_image_auto, TractClassifier, TractDocOrientation, TractModel, TractObjectDetector,
+    TractTextDetector, TractTextRecognizer,
 };

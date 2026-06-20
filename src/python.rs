@@ -14,46 +14,39 @@ use pyo3::prelude::*;
 
 use crate::types::Segment;
 
-/// 이미지 OCR — 검출 + 인식을 실행해 인식 결과(JSON 문자열)를 돌려준다.
+/// 이미지 OCR — 검출 + 인식을 실행해 인식 결과(JSON 문자열)를 돌려준다. DB unclip 과 XY-Cut
+/// 읽기순서는 기본 적용된다.
 ///
 /// 반환: `[{"text": "...", "confidence": 0.97, "bbox": {"x":..,"y":..,"width":..,"height":..}}, ...]`
 ///
-/// 모델·사전 파일은 호출자가 제공한다(README 11장의 PP-OCR ONNX + 전용 사전).
-/// 입력 형상 기본값은 PP-OCRv5 권장값(검출 736x1280, 인식 48x320).
+/// - `auto_rotate` (기본 False): 0/90/180/270° 중 가장 잘 읽히는 방향을 자동 선택. 폰을 옆으로
+///   들고 찍은 화면 사진처럼 회전된 입력에 쓴다.
+/// - `det_long` (기본 1600): 검출 입력의 긴 변 목표 px(입력 비례). 작은 글자가 안 잡히면 올린다.
+///
+/// 모델·사전 파일은 호출자가 제공한다(README 11장의 PP-OCR ONNX + 언어별 전용 사전).
 ///
 /// ```python
 /// import json, rust_ocr_transformer as roct
-/// out = json.loads(roct.recognize_image("page.png", "det.onnx", "rec.onnx", "dict.txt"))
+/// out = json.loads(roct.recognize_image("photo.png", "det.onnx", "rec.onnx", "dict.txt", auto_rotate=True))
 /// for r in out:
 ///     print(r["confidence"], r["text"])
 /// ```
 #[cfg(feature = "tract")]
 #[pyfunction]
-#[pyo3(signature = (
-    image_path, det_model, rec_model, dict_path,
-    det_height = 736, det_width = 1280, rec_height = 48, rec_width = 320,
-))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (image_path, det_model, rec_model, dict_path, auto_rotate = false, det_long = 1600))]
 fn recognize_image(
     image_path: &str,
     det_model: &str,
     rec_model: &str,
     dict_path: &str,
-    det_height: usize,
-    det_width: usize,
-    rec_height: usize,
-    rec_width: usize,
+    auto_rotate: bool,
+    det_long: usize,
 ) -> PyResult<String> {
-    use crate::{Frame, OcrEngine, TractTextDetector, TractTextRecognizer};
+    use crate::Frame;
 
     let frame = Frame::from_path(image_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    let detector = TractTextDetector::new(det_model, (det_height, det_width))
+    let results = crate::recognize_image_auto(&frame, det_model, rec_model, dict_path, auto_rotate, det_long)
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    let recognizer = TractTextRecognizer::new(rec_model, dict_path, (rec_height, rec_width))
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    let engine = OcrEngine::new(detector, recognizer);
-
-    let results = engine.read(&frame).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     serde_json::to_string(&results).map_err(|e| PyRuntimeError::new_err(format!("serialize: {e}")))
 }
 

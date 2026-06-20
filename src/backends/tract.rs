@@ -16,6 +16,7 @@ use std::path::Path;
 use tract_onnx::pb;
 use tract_onnx::prelude::*;
 
+use crate::engine::OcrEngine;
 use crate::error::{Result, VisionError};
 use crate::preprocess;
 use crate::postprocess;
@@ -459,4 +460,84 @@ fn load_lines(path: &Path) -> Result<Vec<String>> {
         lines.pop();
     }
     Ok(lines)
+}
+
+// ── 고수준 이미지 OCR 파이프라인 (CLI·Python 바인딩 공용) ────────────
+
+fn round32(n: usize) -> usize {
+    (((n + 16) / 32) * 32).max(32)
+}
+
+/// 프레임 크기에 비례한 검출 입력 (h, w) — 긴 변을 det_long 에 맞추고 32 배수로(DBNet 1/32).
+fn det_shape(frame: &Frame, det_long: usize) -> (usize, usize) {
+    let (iw, ih) = (frame.image.width() as f32, frame.image.height() as f32);
+    let long = iw.max(ih).max(1.0);
+    let s = det_long as f32 / long;
+    (round32((ih * s) as usize), round32((iw * s) as usize))
+}
+
+/// 인식 결과 중 비어있지 않고 고신뢰(>=0.8)인 영역 수 — 방향 판정 척도(거꾸로/옆이면 바닥).
+fn orient_score(rs: &[Recognized]) -> usize {
+    rs.iter().filter(|r| !r.text.trim().is_empty() && r.confidence >= 0.8).count()
+}
+
+/// 고수준 이미지 OCR — 검출·인식 모델·사전 경로와 옵션으로 인식 결과를 돌려준다(검출 + 인식
+/// 합성). DB unclip 과 XY-Cut 읽기순서는 기본 적용된다.
+///
+/// `auto_rotate` 가 참이면 0/90/180/270° 중 OCR 신뢰도(고신뢰 영역 수)가 가장 높은 방향을 자동
+/// 선택한다 — 폰을 옆으로 들고 찍은 화면 사진처럼 통째 회전된 입력에 견고하다(회전 분류기는
+/// 방향을 자주 틀려, 분류기 대신 인식 점수를 척도로 쓴다). 똑바로 선 입력은 0° 한 번만 보고
+/// 빠르게 통과하고, 0° 가 잘 안 읽힐 때만 네 방향을 모두 시도한다.
+///
+/// `det_long` 은 검출 입력의 긴 변 목표 px(입력 크기에 비례, 32 배수). 고해상 사진을 작은
+/// 고정 입력에 욱여넣어 글자가 뭉개지는 것을 막는다. 검출·인식 모델은 호출마다 새로 적재한다.
+pub fn recognize_image_auto(
+    frame: &Frame,
+    det_model: impl AsRef<Path>,
+    rec_model: impl AsRef<Path>,
+    dict: impl AsRef<Path>,
+    auto_rotate: bool,
+    det_long: usize,
+) -> Result<Vec<Recognized>> {
+    let (det_model, rec_model, dict) = (det_model.as_ref(), rec_model.as_ref(), dict.as_ref());
+    let build = |f: &Frame| -> Result<OcrEngine<TractTextDetector, TractTextRecognizer>> {
+        let (h, w) = det_shape(f, det_long);
+        Ok(OcrEngine::new(
+            TractTextDetector::new(det_model, (h, w))?,
+            TractTextRecognizer::new(rec_model, dict, (48, 320))?,
+        ))
+    };
+
+    let eng = build(frame)?; // 0°/180° 형상
+    let r0 = eng.read(frame)?;
+    // 방향 보정 안 함, 또는 0° 가 충분히 잘 읽히면(흔한 경우) 그대로 채택.
+    if !auto_rotate || orient_score(&r0) >= 8 {
+        return Ok(r0);
+    }
+    // 0° 가 부실하면 90/180/270 까지 인식해 가장 잘 읽히는 방향을 고른다.
+    let rot = |d: u32| -> Frame {
+        let img = match d {
+            90 => frame.image.rotate90(),
+            180 => frame.image.rotate180(),
+            270 => frame.image.rotate270(),
+            _ => frame.image.clone(),
+        };
+        Frame::new(img, frame.index, frame.timestamp)
+    };
+    let f180 = rot(180);
+    let r180 = eng.read(&f180)?; // 0/180 은 같은 형상 → 같은 엔진 재사용
+    let f90 = rot(90);
+    let f270 = rot(270);
+    let eng_p = build(&f90)?; // 90/270 은 회전 형상 → 새 엔진(1 회만 적재)
+    let r90 = eng_p.read(&f90)?;
+    let r270 = eng_p.read(&f270)?;
+    // 0° 우선(동점 시 유지), 나머지 중 고신뢰 영역이 가장 많은 방향 선택.
+    let mut best = (orient_score(&r0), r0);
+    for r in [r90, r180, r270] {
+        let s = orient_score(&r);
+        if s > best.0 {
+            best = (s, r);
+        }
+    }
+    Ok(best.1)
 }

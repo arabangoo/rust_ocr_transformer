@@ -1,6 +1,6 @@
 [package]
 name         = "rust_ocr_transformer"
-version      = "0.1.1"
+version      = "0.2.0"
 edition      = "2021"
 license      = "Apache-2.0"
 description  = "Video-first Rust OCR pipeline — smart frame sampling (SSIM) + temporal dedup, emitting timestamped text/SRT for RAG ingestion. Recognition backends are embedded behind traits, not reinvented."
