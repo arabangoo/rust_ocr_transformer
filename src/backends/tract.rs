@@ -92,16 +92,40 @@ pub struct TractTextDetector {
     model: TractModel,
     bin_threshold: f32,
     min_area: usize,
+    /// DB unclip 비율 — 수축된 검출 박스를 글자 전체가 들어오도록 바깥으로 팽창.
+    /// PaddleOCR 의 det_db_unclip_ratio 에 해당(1.0 = 미적용, 권장 1.5).
+    unclip_ratio: f32,
+    /// XY-Cut 읽기순서의 최소 분할 간격(px). 단/행을 가르는 빈 픽셀 임계값.
+    xycut_gap: usize,
 }
 
 impl TractTextDetector {
     /// 검출 모델 적재. 입력은 letterbox 로 (h,w)에 맞춘다(예: 736x1280).
     pub fn new(model_path: impl AsRef<Path>, (h, w): (usize, usize)) -> Result<Self> {
-        Ok(Self { model: TractModel::load(model_path, h, w)?, bin_threshold: 0.3, min_area: 16 })
+        Ok(Self {
+            model: TractModel::load(model_path, h, w)?,
+            bin_threshold: 0.3,
+            min_area: 16,
+            unclip_ratio: 1.5,
+            xycut_gap: 8,
+        })
     }
 
     pub fn with_threshold(mut self, bin_threshold: f32) -> Self {
         self.bin_threshold = bin_threshold;
+        self
+    }
+
+    /// DB unclip 비율 설정(1.0 = 팽창 없음). DB 검출은 글자보다 수축된 영역을 예측하므로,
+    /// 크롭 전에 박스를 되팽창시켜야 글자 가장자리(특히 첫 글자)가 잘리지 않는다.
+    pub fn with_unclip(mut self, ratio: f32) -> Self {
+        self.unclip_ratio = ratio.max(1.0);
+        self
+    }
+
+    /// XY-Cut 읽기순서의 최소 분할 간격(px) 설정. 작을수록 잘게 가른다(자간보다 크게).
+    pub fn with_xycut_gap(mut self, gap: usize) -> Self {
+        self.xycut_gap = gap.max(1);
         self
     }
 }
@@ -124,15 +148,36 @@ impl TextDetector for TractTextDetector {
         let boxes = postprocess::connected_boxes(&prob[..ph * pw], pw, ph, self.bin_threshold, self.min_area);
         let map_x = self.model.dims().1 as f32 / pw as f32;
         let map_y = self.model.dims().0 as f32 / ph as f32;
-        Ok(boxes
+        let (iw, ih) = (frame.image.width() as f32, frame.image.height() as f32);
+        let ratio = self.unclip_ratio;
+        // 각 박스를 (타이트 원본박스, unclip 팽창 TextBox) 쌍으로. 읽기순서는 타이트 박스로,
+        // 크롭·출력은 팽창 박스로 한다(팽창 박스는 줄끼리 Y 로 겹쳐 XY-Cut 투영 분할을 망침).
+        let mapped: Vec<(BBox, TextBox)> = boxes
             .into_iter()
             .map(|(bx, by, bw, bh, score)| {
-                let ox = (bx as f32 * map_x / scale) as u32;
-                let oy = (by as f32 * map_y / scale) as u32;
-                let ow = (bw as f32 * map_x / scale).max(1.0) as u32;
-                let oh = (bh as f32 * map_y / scale).max(1.0) as u32;
-                TextBox { bbox: BBox::new(ox, oy, ow, oh), confidence: score }
+                let x = bx as f32 * map_x / scale;
+                let y = by as f32 * map_y / scale;
+                let w = (bw as f32 * map_x / scale).max(1.0);
+                let h = (bh as f32 * map_y / scale).max(1.0);
+                let tight = BBox::new(x as u32, y as u32, w as u32, h as u32);
+                // DB unclip(DBNet): 수축된 박스를 오프셋 d = area*ratio/perimeter 만큼 바깥으로
+                // 팽창(PaddleOCR 와 동일). 축 정렬 박스에 근사 적용하고 이미지 경계로 자른다.
+                let d = if ratio > 1.0 { (w * h) * ratio / (2.0 * (w + h)) } else { 0.0 };
+                let x0 = (x - d).max(0.0);
+                let y0 = (y - d).max(0.0);
+                let x1 = (x + w + d).min(iw);
+                let y1 = (y + h + d).min(ih);
+                let unclipped =
+                    BBox::new(x0 as u32, y0 as u32, (x1 - x0).max(1.0) as u32, (y1 - y0).max(1.0) as u32);
+                (tight, TextBox { bbox: unclipped, confidence: score })
             })
+            .collect();
+        // 연결요소 추출은 래스터 스캔 순서라 단어가 뒤섞인다. XY-Cut 으로 읽기순서(다단·표·
+        // 나란한 패널까지)를 잡아 인식 결과가 페이지 순서대로 나오게 한다.
+        let tights: Vec<BBox> = mapped.iter().map(|(t, _)| *t).collect();
+        Ok(postprocess::xy_cut_order(&tights, self.xycut_gap)
+            .into_iter()
+            .map(|i| mapped[i].1)
             .collect())
     }
 }
@@ -221,6 +266,56 @@ impl Classifier for TractClassifier {
                 score: probs[i],
             })
             .collect())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 문서 방향 분류 (PP-LCNet doc-ori → 0/90/180/270 보정)
+// ─────────────────────────────────────────────────────────────────
+
+/// 문서 이미지 방향(0/90/180/270°) 분류 — 회전된 사진/스캔을 OCR 전에 바로 세운다.
+/// PP-LCNet doc-ori 모델(출력 [1,4], 클래스 순서 0/90/180/270). 입력 224x224 권장.
+/// 폰을 옆으로 들고 찍은 화면 사진처럼 통째로 회전된 입력을 정상화한다.
+pub struct TractDocOrientation {
+    model: TractModel,
+}
+
+impl TractDocOrientation {
+    /// 방향 분류 모델 적재(입력 224x224 권장).
+    pub fn new(model_path: impl AsRef<Path>, (h, w): (usize, usize)) -> Result<Self> {
+        Ok(Self { model: TractModel::load(model_path, h, w)? })
+    }
+
+    /// 추정 회전 각도(0/90/180/270) — 이미지가 시계방향으로 그만큼 돌아가 있다는 의미.
+    pub fn predict(&self, frame: &Frame) -> Result<u32> {
+        Ok(self.predict_conf(frame)?.0)
+    }
+
+    /// 추정 각도 + 분류기 신뢰도(softmax 최대 확률, 0.0-1.0). 화면 사진처럼 학습 분포 밖
+    /// 입력에선 오분류가 잦아, 신뢰도로 게이팅해 저신뢰면 회전을 보류하는 데 쓴다.
+    pub fn predict_conf(&self, frame: &Frame) -> Result<(u32, f32)> {
+        let (h, w) = self.model.dims();
+        let data =
+            preprocess::resize_chw(&frame.image, h, w, preprocess::IMAGENET_MEAN, preprocess::IMAGENET_STD);
+        let (logits, _) = self.model.run(data)?;
+        let probs = postprocess::softmax(&logits);
+        let (idx, conf) = postprocess::argmax(&probs);
+        Ok(([0u32, 90, 180, 270][idx.min(3)], conf))
+    }
+
+    /// 방향을 보정한 새 Frame(똑바로 세움). 예측 0°면 원본 그대로.
+    /// 시계방향 deg 만큼 돌아간 것을 되돌리므로 반대 방향으로 회전한다.
+    /// `min_conf` 이상일 때만 회전 — 저신뢰 오분류로 멀쩡한 입력을 뒤집는 것을 막는다.
+    pub fn correct(&self, frame: &Frame, min_conf: f32) -> Result<Frame> {
+        let (deg, conf) = self.predict_conf(frame)?;
+        let deg = if conf >= min_conf { deg } else { 0 };
+        let img = match deg {
+            90 => frame.image.rotate270(),
+            180 => frame.image.rotate180(),
+            270 => frame.image.rotate90(),
+            _ => frame.image.clone(),
+        };
+        Ok(Frame::new(img, frame.index, frame.timestamp))
     }
 }
 

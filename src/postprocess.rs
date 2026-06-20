@@ -166,6 +166,143 @@ pub fn connected_boxes(
     boxes
 }
 
+/// 검출 박스를 읽기 순서로 정렬한 인덱스를 돌려준다: 위→아래 줄, 한 줄 안에서는 왼→오른쪽.
+///
+/// 연결요소 추출([`connected_boxes`])은 확률맵 래스터 스캔 순서로 박스를 내놓아, 같은 줄의
+/// 단어들이 좌우 뒤섞여 나올 수 있다(예: 줄 끝 단어가 먼저). 자막·문서 라인 같은 축 정렬
+/// 가로 텍스트를 가정하고, 세로 중심으로 줄을 묶은 뒤 줄 안에서 x 로 정렬한다.
+///
+/// 같은 줄 판정: 박스의 세로 중심이 현재 줄 기준에서 그 박스 높이의 절반을 넘게 벗어나면
+/// 새 줄로 본다(글자 높이 정도의 흔들림은 같은 줄로 흡수).
+pub fn reading_order(boxes: &[BBox]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..boxes.len()).collect();
+    if idx.len() < 2 {
+        return idx;
+    }
+    let cy = |b: &BBox| b.y as f32 + b.height as f32 / 2.0;
+    // 1) 세로 중심 오름차순.
+    idx.sort_by(|&i, &j| cy(&boxes[i]).partial_cmp(&cy(&boxes[j])).unwrap_or(std::cmp::Ordering::Equal));
+    // 2) 줄 단위로 묶는다(현재 줄의 첫 박스 세로중심을 기준으로 비교).
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    for &i in &idx {
+        let ci = cy(&boxes[i]);
+        let same_line = lines.last().is_some_and(|line| {
+            let first = *line.first().unwrap();
+            (ci - cy(&boxes[first])).abs() <= boxes[i].height as f32 * 0.5
+        });
+        if same_line {
+            lines.last_mut().unwrap().push(i);
+        } else {
+            lines.push(vec![i]);
+        }
+    }
+    // 3) 각 줄 안에서 x 오름차순으로 펼친다.
+    let mut out = Vec::with_capacity(boxes.len());
+    for mut line in lines {
+        line.sort_by_key(|&i| boxes[i].x);
+        out.extend(line);
+    }
+    out
+}
+
+// ── XY-Cut 읽기순서 (재귀 투영 분할) ─────────────────────────────────
+//
+// 박스들을 Y 축으로 투영해 가로 띠(행)로 가르고, 각 띠를 다시 X 축으로 투영해 세로 단(열)
+// 으로 가른다. 단이 더 안 갈리면 그 묶음을 읽기순서로 확정하고, 갈리면 각 단을 재귀한다.
+// [`reading_order`] 의 단순 줄 묶기와 달리 다단·표·나란한 패널(표 + 설명) 같은 복잡한
+// 레이아웃의 읽기순서를 올바로 잡는다(왼쪽 단을 끝까지 읽고 다음 단으로).
+
+type Rect = (u32, u32, u32, u32); // (left, top, right, bottom)
+
+/// boxes 의 [start,end) 구간을 axis(0=x, 1=y)로 투영한 1D 카운트 히스토그램.
+fn xy_projection(boxes: &[Rect], axis: usize) -> Vec<u32> {
+    let max = boxes.iter().map(|b| if axis == 0 { b.2 } else { b.3 }).max().unwrap_or(0) as usize;
+    let mut hist = vec![0u32; max];
+    for b in boxes {
+        let (s, e) = if axis == 0 { (b.0 as usize, b.2 as usize) } else { (b.1 as usize, b.3 as usize) };
+        for h in hist.iter_mut().take(e.min(max)).skip(s) {
+            *h += 1;
+        }
+    }
+    hist
+}
+
+/// 투영 히스토그램에서 값이 min_value 초과인 연속 구간들의 (start, end[exclusive]).
+/// 비영 위치의 인덱스 간격이 min_gap 초과면 다른 구간으로 가른다.
+fn xy_split(hist: &[u32], min_value: u32, min_gap: usize) -> Vec<(usize, usize)> {
+    let idx: Vec<usize> = hist.iter().enumerate().filter(|(_, &v)| v > min_value).map(|(i, _)| i).collect();
+    if idx.is_empty() {
+        return Vec::new();
+    }
+    let mut starts = vec![idx[0]];
+    let mut ends = Vec::new();
+    for w in idx.windows(2) {
+        if w[1] - w[0] > min_gap {
+            ends.push(w[0]);
+            starts.push(w[1]);
+        }
+    }
+    ends.push(*idx.last().unwrap());
+    starts.into_iter().zip(ends).map(|(s, e)| (s, e + 1)).collect()
+}
+
+fn xy_cut_rec(boxes: &[Rect], indices: &[usize], res: &mut Vec<usize>, min_gap: usize) {
+    if boxes.is_empty() {
+        return;
+    }
+    // Y 정렬 후 가로 띠로 분할.
+    let mut yo: Vec<usize> = (0..boxes.len()).collect();
+    yo.sort_by_key(|&i| boxes[i].1);
+    let yb: Vec<Rect> = yo.iter().map(|&i| boxes[i]).collect();
+    let yi: Vec<usize> = yo.iter().map(|&i| indices[i]).collect();
+    for (r0, r1) in xy_split(&xy_projection(&yb, 1), 0, min_gap) {
+        let sel: Vec<usize> = (0..yb.len()).filter(|&i| (yb[i].1 as usize) >= r0 && (yb[i].1 as usize) < r1).collect();
+        // 띠 안에서 X 정렬 후 세로 단으로 분할.
+        let bb: Vec<Rect> = sel.iter().map(|&i| yb[i]).collect();
+        let bi: Vec<usize> = sel.iter().map(|&i| yi[i]).collect();
+        let mut xo: Vec<usize> = (0..bb.len()).collect();
+        xo.sort_by_key(|&i| bb[i].0);
+        let xb: Vec<Rect> = xo.iter().map(|&i| bb[i]).collect();
+        let xi: Vec<usize> = xo.iter().map(|&i| bi[i]).collect();
+        let cols = xy_split(&xy_projection(&xb, 0), 0, min_gap);
+        match cols.len() {
+            0 => continue,
+            1 => res.extend(&xi), // 단일 단 → x 순서로 확정
+            _ => {
+                for (c0, c1) in cols {
+                    let csel: Vec<usize> =
+                        (0..xb.len()).filter(|&i| (xb[i].0 as usize) >= c0 && (xb[i].0 as usize) < c1).collect();
+                    let cb: Vec<Rect> = csel.iter().map(|&i| xb[i]).collect();
+                    let ci: Vec<usize> = csel.iter().map(|&i| xi[i]).collect();
+                    xy_cut_rec(&cb, &ci, res, min_gap);
+                }
+            }
+        }
+    }
+}
+
+/// 재귀 XY-Cut 으로 검출 박스의 읽기순서 인덱스를 구한다. 다단·표·나란한 패널 레이아웃을
+/// [`reading_order`] 의 단순 줄 묶기보다 정확히 처리한다(왼쪽 단을 끝까지 읽고 다음 단으로).
+/// `min_gap` 은 단/행을 가르는 최소 빈 픽셀(권장 8 — 자간보다 크고 단 간격보다 작게).
+pub fn xy_cut_order(boxes: &[BBox], min_gap: usize) -> Vec<usize> {
+    if boxes.len() < 2 {
+        return (0..boxes.len()).collect();
+    }
+    let rects: Vec<Rect> = boxes
+        .iter()
+        .map(|b| (b.x, b.y, b.x + b.width.max(1), b.y + b.height.max(1)))
+        .collect();
+    let indices: Vec<usize> = (0..rects.len()).collect();
+    let mut res = Vec::with_capacity(rects.len());
+    xy_cut_rec(&rects, &indices, &mut res, min_gap);
+    // 투영이 0이라 빠진 퇴화 박스는 끝에 원래 순서로 덧붙여 모든 인덱스를 보존.
+    if res.len() < boxes.len() {
+        let seen: std::collections::HashSet<usize> = res.iter().copied().collect();
+        res.extend((0..boxes.len()).filter(|i| !seen.contains(i)));
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +357,54 @@ mod tests {
         let (text, conf) = ctc_greedy_decode(&logits, 4, 3, &dict);
         assert_eq!(text, "ab");
         assert!(conf > 0.0);
+    }
+
+    #[test]
+    fn reading_order_groups_lines_then_sorts_x() {
+        // 1줄(y≈50): 오른쪽 단어(x=150)가 왼쪽(x=40)보다 먼저 들어옴(래스터 스캔 흉내).
+        // 2줄(y≈120): 가운데 한 단어. 같은 줄 흔들림(y 50 vs 52)은 한 줄로 흡수돼야 한다.
+        let boxes = vec![
+            BBox::new(150, 50, 30, 20), // 0: 1줄 오른쪽
+            BBox::new(40, 52, 30, 20),  // 1: 1줄 왼쪽
+            BBox::new(200, 120, 30, 20),// 2: 2줄
+        ];
+        // 기대: 1줄을 왼→오른(1, 0) 정렬 후 2줄(2).
+        assert_eq!(reading_order(&boxes), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn reading_order_handles_trivial() {
+        assert_eq!(reading_order(&[]), Vec::<usize>::new());
+        assert_eq!(reading_order(&[BBox::new(0, 0, 5, 5)]), vec![0]);
+    }
+
+    #[test]
+    fn xy_cut_reads_columns_top_to_bottom() {
+        // 왼쪽 단(세로로 긴 한 박스) + 오른쪽 단(위·아래 두 박스). 가운데 세로 공백(gutter)
+        // 으로 나뉘는 다단 레이아웃 → 왼 단을 먼저, 그다음 오른 단(위→아래).
+        let boxes = vec![
+            BBox::new(0, 0, 40, 90),    // 0: 왼쪽 단
+            BBox::new(100, 0, 40, 30),  // 1: 오른쪽 단 위
+            BBox::new(100, 50, 40, 30), // 2: 오른쪽 단 아래
+        ];
+        assert_eq!(xy_cut_order(&boxes, 8), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn xy_cut_reads_rows_when_horizontally_separated() {
+        // 행 사이 가로 공백이 있는 2x2 격자 → 윗행(좌→우), 아랫행(좌→우).
+        let boxes = vec![
+            BBox::new(0, 0, 40, 30),    // 0: 좌상
+            BBox::new(100, 0, 40, 30),  // 1: 우상
+            BBox::new(0, 50, 40, 30),   // 2: 좌하
+            BBox::new(100, 50, 40, 30), // 3: 우하
+        ];
+        assert_eq!(xy_cut_order(&boxes, 8), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn xy_cut_trivial() {
+        assert_eq!(xy_cut_order(&[], 8), Vec::<usize>::new());
+        assert_eq!(xy_cut_order(&[BBox::new(0, 0, 5, 5)], 8), vec![0]);
     }
 }
