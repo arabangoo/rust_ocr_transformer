@@ -116,7 +116,7 @@ for r in json.loads(out):
 
 ```toml
 [dependencies]
-rust_ocr_transformer = { git = "https://github.com/arabangoo/rust_ocr_transformer", tag = "v0.2.0" }
+rust_ocr_transformer = { git = "https://github.com/arabangoo/rust_ocr_transformer", tag = "v0.2.1" }
 ```
 
 ### Feature 목록
@@ -450,7 +450,7 @@ pip install "git+https://github.com/arabangoo/rust_ocr_transformer"
 import json
 import rust_ocr_transformer as roct
 
-roct.__version__                              # "0.2.0"
+roct.__version__                              # "0.2.1"
 
 # 이미지 OCR — 검출+인식 결과를 JSON 문자열로 (DB unclip·XY-Cut 읽기순서 기본 적용)
 out = roct.recognize_image("page.png", "models/det.onnx", "models/rec.onnx", "models/dict.txt")
