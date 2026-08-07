@@ -1,84 +1,77 @@
 # rust_ocr_transformer
 
-> **Rust 기반 통합 비전 추론·처리 프레임워크**
+> **A unified vision inference and processing framework, written in Rust.**
 >
-> 이미지·영상을 `디코드 → 전처리 → 신경망 모델 추론 → 후처리 → 구조화 출력`으로 흘려보낸다.
-> 작업별 모델(텍스트 검출·인식, 분류, 객체 검출, 레이아웃, 세그멘테이션)을 trait 뒤에 꽂아
-> 교체하는 오케스트레이션 틀이며, 기본 추론은 **순수 Rust(`tract`) / zero FFI / CPU** 로 동작한다.
+> It streams images and video through `decode -> preprocess -> neural-network inference -> postprocess -> structured output`.
+> It is an orchestration layer where per-task models (text detection/recognition, classification, object detection, layout, segmentation) plug in behind traits and swap out freely. The default inference runs on **pure Rust (`tract`), zero FFI, CPU**.
 
-이 문서는 라이브러리의 **개발자 매뉴얼**이다. 설계 원칙, 공개 API, 작업별 동작과 성숙도,
-CLI/Python 사용법, 모델 준비, 서비스 통합, 새 작업/백엔드 추가법, 빌드·테스트 절차를 담는다.
+This document is the **developer manual** for the library. It covers the design principles, the public API, per-task behavior and maturity, CLI and Python usage, model preparation, service integration, how to add a new task or backend, and the build and test workflow.
 
-[주요 참고 논문]
+**Key references**
 
-1. DBNet: Real-time Scene Text Detection with Differentiable Binarization (텍스트 검출 + DB 후처리) - https://arxiv.org/abs/1911.08947
-2. CRNN: An End-to-End Trainable Neural Network for Image-based Sequence Recognition (CNN+RNN+CTC 시퀀스 인식) - https://arxiv.org/abs/1507.05717
-3. SVTR: Scene Text Recognition with a Single Visual Model (PP-OCRv5 인식 백본) - https://arxiv.org/abs/2205.00159
-4. PP-OCR: A Practical Ultra Lightweight OCR System (임베드하는 경량 OCR 모델군) - https://arxiv.org/abs/2009.09941
-5. Image Quality Assessment: From Error Visibility to Structural Similarity (SSIM — 영상 프레임 샘플링 게이트) - https://ece.uwaterloo.ca/~z70wang/research/ssim/
+1. DBNet: Real-time Scene Text Detection with Differentiable Binarization (text detection + DB post-processing) - https://arxiv.org/abs/1911.08947
+2. CRNN: An End-to-End Trainable Neural Network for Image-based Sequence Recognition (CNN+RNN+CTC sequence recognition) - https://arxiv.org/abs/1507.05717
+3. SVTR: Scene Text Recognition with a Single Visual Model (PP-OCRv5 recognition backbone) - https://arxiv.org/abs/2205.00159
+4. PP-OCR: A Practical Ultra Lightweight OCR System (the lightweight OCR model family embedded here) - https://arxiv.org/abs/2009.09941
+5. Image Quality Assessment: From Error Visibility to Structural Similarity (SSIM, the video frame-sampling gate) - https://ece.uwaterloo.ca/~z70wang/research/ssim/
 
 ---
 
-## 목차
+## Table of Contents
 
-1. [핵심 특징](#1-핵심-특징)
-2. [빠른 시작](#2-빠른-시작)
-3. [설치와 Cargo Feature](#3-설치와-cargo-feature)
-4. [아키텍처](#4-아키텍처)
-5. [공통 타입 레퍼런스](#5-공통-타입-레퍼런스)
-6. [공개 API 레퍼런스](#6-공개-api-레퍼런스)
-7. [작업별 동작과 성숙도](#7-작업별-동작과-성숙도)
-8. [영상 시간축 처리](#8-영상-시간축-처리)
-9. [CLI 도구 (`roct`)](#9-cli-도구-roct)
-10. [Python 바인딩 (PyO3)](#10-python-바인딩-pyo3)
-11. [모델 준비 (ONNX 모델·사전)](#11-모델-준비-onnx-모델사전)
-12. [서비스 파이프라인에 붙이기](#12-서비스-파이프라인에-붙이기)
-13. [새 작업·백엔드 추가하기](#13-새-작업백엔드-추가하기)
-14. [빌드 · Feature 조합 · 테스트](#14-빌드--feature-조합--테스트)
-15. [디렉토리 구조](#15-디렉토리-구조)
-16. [라이선스](#16-라이선스)
+1. [Key Features](#1-key-features)
+2. [Quick Start](#2-quick-start)
+3. [Installation and Cargo Features](#3-installation-and-cargo-features)
+4. [Architecture](#4-architecture)
+5. [Common Type Reference](#5-common-type-reference)
+6. [Public API Reference](#6-public-api-reference)
+7. [Per-Task Behavior and Maturity](#7-per-task-behavior-and-maturity)
+8. [Video Timeline Processing](#8-video-timeline-processing)
+9. [CLI Tool (`roct`)](#9-cli-tool-roct)
+10. [Python Bindings (PyO3)](#10-python-bindings-pyo3)
+11. [Model Preparation (ONNX Models and Dictionaries)](#11-model-preparation-onnx-models-and-dictionaries)
+12. [Embedding into a Service Pipeline](#12-embedding-into-a-service-pipeline)
+13. [Adding a New Task or Backend](#13-adding-a-new-task-or-backend)
+14. [Build, Feature Combinations, and Testing](#14-build-feature-combinations-and-testing)
+15. [Directory Layout](#15-directory-layout)
+16. [License](#16-license)
 
 ---
 
-## 1. 핵심 특징
+## 1. Key Features
 
-비전 파이프라인에서 과소평가되는 영역이 **전·후처리와 오케스트레이션**이다. 모델이 아무리 좋아도
-입력 정규화·검출 후처리·디코딩 규약이 어긋나면 결과가 무너진다. 이 라이브러리는 단일 만능 모델이
-아니라, 그 위아래의 시스템 엔지니어링을 책임지는 **틀**을 지향한다.
+The underrated part of a vision pipeline is **pre/post-processing and orchestration**. No matter how good the model is, results collapse when input normalization, detection post-processing, or decoding conventions are off. This library is not a single do-everything model; it aims to be the **framework** that owns the systems engineering above and below the model.
 
-| 원칙 | 의미 |
+| Principle | What it means |
 |---|---|
-| **모델은 담지 않고 꽂는다** | "지능"은 trait 뒤의 모델 몫이다. 프레임워크는 디코드·전처리·후처리·조립을 맡는다. 같은 입력이면 같은 모델로 같은 결과(결정적). |
-| **작업 단위 추상화** | 텍스트 검출/인식, 분류, 객체 검출, 레이아웃, 세그멘테이션을 각각의 trait 으로 분리. 새 모델은 trait 하나만 구현하면 끼워진다. |
-| **순수 Rust 기본 / zero FFI** | 기본 추론 엔진은 `tract`(순수 Rust ONNX 런타임). C++ ONNX Runtime·CUDA·subprocess 불필요. CPU 단일 바이너리·클린 abi3 휠. 속도/GPU 가 필요하면 `ort` 를 opt-in 으로 더한다. |
-| **영상 1급 시민** | 정지 이미지는 프레임 1개인 영상의 퇴화 사례. 같은 파이프라인이 둘 다 받고, 영상에는 SSIM 샘플링·시간축 병합이 더해진다. |
+| **Plug the model in, don't bake it in** | The "intelligence" belongs to the model behind the trait. The framework handles decode, preprocessing, post-processing, and assembly. Same input, same model, same result (deterministic). |
+| **Task-level abstraction** | Text detection/recognition, classification, object detection, layout, and segmentation are each separated behind their own trait. A new model plugs in by implementing a single trait. |
+| **Pure Rust by default, zero FFI** | The default inference engine is `tract` (a pure-Rust ONNX runtime). No C++ ONNX Runtime, CUDA, or subprocess. A CPU single binary and a clean abi3 wheel. When you need speed or GPU, add `ort` as an opt-in. |
+| **Video as a first-class citizen** | A still image is the degenerate case of a video with one frame. The same pipeline takes both, and video adds SSIM sampling and timeline merging. |
 
-### "이해"는 코어 밖이다
+### "Understanding" lives outside the core
 
-이 프레임워크가 만드는 것은 "무엇이 어디에 있다"(텍스트·박스·클래스·좌표)까지의 **구조화된 비전
-결과**다. "이 영수증을 JSON 으로 해석", "사고 사진의 손상 부위 판독" 같은 **이해·추론**은 대형
-VLM/LLM 의 몫이며, 그건 코어 밖(서버 등)에 위임하고 이 프레임워크는 그 입력을 만든다. 순수 문자
-인식은 소형 특화 모델이 프론티어 LLM 보다 정확하고 결정적·저비용이므로, 코어는 LLM-free 로 둔다.
+What this framework produces is **structured vision results**, up to "what is where" (text, boxes, classes, coordinates). **Understanding and reasoning**, such as "interpret this receipt as JSON" or "assess the damaged area in this accident photo", belong to large VLMs/LLMs. That work is delegated outside the core (to a server, for example), and this framework produces its input. For pure character recognition, small specialized models are more accurate, deterministic, and cheaper than frontier LLMs, so the core is kept LLM-free.
 
 ---
 
-## 2. 빠른 시작
+## 2. Quick Start
 
-### Rust 라이브러리 (OCR)
+### Rust library (OCR)
 
 ```rust
 use rust_ocr_transformer::{Frame, OcrEngine, TractTextDetector, TractTextRecognizer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 이미지 1장 로드 (영상은 프레임 스트림으로 같은 엔진에 흘린다)
+    // Load a single image (for video, feed a frame stream into the same engine)
     let frame = Frame::from_path("page.png")?;
 
-    // 검출 모델(입력 736x1280) + 인식 모델(입력 48x320) + 문자 사전
+    // detector (input 736x1280) + recognizer (input 48x320) + character dictionary
     let detector = TractTextDetector::new("models/det.onnx", (736, 1280))?;
     let recognizer = TractTextRecognizer::new("models/rec.onnx", "models/dict.txt", (48, 320))?;
     let engine = OcrEngine::new(detector, recognizer);
 
-    // 검출 → 크롭 → 인식
+    // detect -> crop -> recognize
     for r in engine.read(&frame)? {
         println!("[{:.2}] ({},{}) {}", r.confidence, r.bbox.x, r.bbox.y, r.text);
     }
@@ -86,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-모델·사전 파일을 받는 방법은 [11장](#11-모델-준비-onnx-모델사전)에 있다.
+See [section 11](#11-model-preparation-onnx-models-and-dictionaries) for how to obtain the model and dictionary files.
 
 ### CLI
 
@@ -102,7 +95,7 @@ cargo build --release --features cli
 import json
 import rust_ocr_transformer as roct
 
-# 이미지 OCR — 모델·사전 경로를 주면 인식 결과 JSON 반환
+# Image OCR: pass model/dict paths, get recognition results as JSON
 out = roct.recognize_image("page.png", "models/det.onnx", "models/rec.onnx", "models/dict.txt")
 for r in json.loads(out):
     print(r["confidence"], r["text"])
@@ -110,86 +103,82 @@ for r in json.loads(out):
 
 ---
 
-## 3. 설치와 Cargo Feature
+## 3. Installation and Cargo Features
 
 `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_ocr_transformer = { git = "https://github.com/arabangoo/rust_ocr_transformer", tag = "v0.2.1" }
+rust_ocr_transformer = { git = "https://github.com/arabangoo/rust_ocr_transformer", tag = "v0.2.2" }
 ```
 
-### Feature 목록
+### Feature list
 
-| Feature | 활성화 대상 | 비고 |
+| Feature | Enables | Notes |
 |---|---|---|
-| **`tract`** | 순수 Rust ONNX 추론 백엔드 | 기본 활성. C++ FFI 없음. `tract-onnx` |
-| `video` | 영상 디코드(Phase 2) | `ffmpeg-next` — 현재 자리만 잡힘, 미구현 |
-| **`cli`** | `roct` 실행 바이너리 | `clap` — 라이브러리 소비자에겐 새지 않는 opt-in |
-| **`python`** | PyO3 cdylib 바인딩 | `pyo3`(abi3) |
+| **`tract`** | pure-Rust ONNX inference backend | on by default. No C++ FFI. `tract-onnx` |
+| `video` | video decode (Phase 2) | `ffmpeg-next`. Placeholder only for now, not yet implemented |
+| **`cli`** | the `roct` binary | `clap`. An opt-in that does not leak to library consumers. |
+| **`python`** | PyO3 cdylib bindings | `pyo3` (abi3) |
 
 ```toml
-# default = ["tract"]   ← 순수 Rust 인식 백엔드 포함, zero FFI
+# default = ["tract"]  # pure-Rust recognition backend, zero FFI
 
-# 코어 IP(타입·trait·샘플링·병합·전후처리)만, 백엔드는 직접 주입하고 싶을 때
+# core IP only (types, traits, sampling, merging, pre/post-processing); inject the backend yourself
 rust_ocr_transformer = { version = "0.1", default-features = false }
 ```
 
-> 기본(`tract`) 빌드는 외부 `.so/.dll` 이나 subprocess 를 요구하지 않는다. 속도·GPU 가 병목이면
-> 같은 trait 뒤에 들어오는 `ort`(ONNX Runtime, C++ FFI) 백엔드를 opt-in feature 로 추가할 계획이다
-> (현재 미구현 — 데드 feature 를 미리 만들지 않는다).
+> The default (`tract`) build requires no external `.so/.dll` and no subprocess. If speed or GPU becomes the bottleneck, the plan is to add an `ort` (ONNX Runtime, C++ FFI) backend behind the same trait as an opt-in feature (not yet implemented; we do not create dead features up front).
 
 ---
 
-## 4. 아키텍처
+## 4. Architecture
 
 ```text
-디코드 → 전처리 → 작업 모델(trait) → 후처리 → 구조화 출력
- Frame   preprocess   tasks::*        postprocess   FrameAnalysis
-                       (모델 plug point)              + SRT/JSON/평문
+decode -> preprocess -> task model (trait) -> postprocess -> structured output
+ Frame    preprocess    tasks::*             postprocess    FrameAnalysis
+                        (model plug point)                  + SRT/JSON/plaintext
 ```
 
-핵심은 **작업 trait 레이어**다. 각 작업(검출·인식·분류·객체검출·레이아웃·세그멘테이션)은
-입력으로 공통 [`Frame`](#5-공통-타입-레퍼런스) 을 받고 작업별 결과 타입을 낸다. 모델은 그 trait 의
-구현체로 들어오므로, 코어 파이프라인은 어떤 모델을 쓰는지 모른 채 작업 단위로만 조립된다.
+The heart of it is the **task-trait layer**. Each task (detection, recognition, classification, object detection, layout, segmentation) takes a common [`Frame`](#5-common-type-reference) as input and produces a per-task result type. The model enters as an implementation of that trait, so the core pipeline assembles purely at the task level without knowing which model is used.
 
-- **디코드** — 이미지/영상을 [`Frame`](#5-공통-타입-레퍼런스) 으로. 이미지 = 프레임 1개 영상.
-- **전처리** — [`preprocess`](#63-전처리-preprocess): letterbox 리사이즈·정규화·NCHW 텐서화. 작업 무관 재사용.
-- **추론** — [`tasks`](#61-작업-trait) trait 뒤의 모델([`backends::tract`](#133-tract-백엔드-참고)).
-- **후처리** — [`postprocess`](#64-후처리-postprocess): 비최대 억제(NMS)·softmax·연결성 시계열 분류(CTC) 디코딩·DB 박스.
-- **출력** — [`FrameAnalysis`](#5-공통-타입-레퍼런스) 로 여러 작업 결과를 모으고, 영상은 [SRT/JSON](#8-영상-시간축-처리) 으로.
+- **Decode**: an image/video becomes a [`Frame`](#5-common-type-reference). An image is a one-frame video.
+- **Preprocess**: [`preprocess`](#63-preprocessing-preprocess): letterbox resize, normalization, NCHW tensorization. Reused across tasks.
+- **Inference**: the model behind a [`tasks`](#61-task-traits) trait ([`backends::tract`](#133-the-tract-backend-reference)).
+- **Postprocess**: [`postprocess`](#64-postprocessing-postprocess): non-maximum suppression (NMS), softmax, connectionist temporal classification (CTC) decoding, DB boxes.
+- **Output**: [`FrameAnalysis`](#5-common-type-reference) gathers results from multiple tasks, and video is emitted as [SRT/JSON](#8-video-timeline-processing).
 
 ---
 
-## 5. 공통 타입 레퍼런스
+## 5. Common Type Reference
 
-`types` 모듈. 결과 타입은 `serde::{Serialize, Deserialize}` 를 구현해 그대로 JSON 으로 떨어뜨릴 수 있다.
+The `types` module. Result types implement `serde::{Serialize, Deserialize}`, so they can be dumped straight to JSON.
 
 ```rust
-/// 파이프라인 1단위. 이미지는 프레임이 1개인 영상의 퇴화 사례다.
+/// One pipeline unit. An image is the degenerate case of a video with a single frame.
 pub struct Frame {
     pub image:     image::DynamicImage,
-    pub index:     u64,        // 영상 내 프레임 순번 (이미지면 0)
-    pub timestamp: Timestamp,  // 표시 시각(ms) (이미지면 0)
+    pub index:     u64,        // frame index within the video (0 for an image)
+    pub timestamp: Timestamp,  // presentation time in ms (0 for an image)
 }
 // Frame::from_path(p) / Frame::from_image(img) / Frame::new(img, index, ts)
 
-/// 픽셀 좌표계 사각 영역(좌상단 원점).
+/// Rectangular region in pixel coordinates (origin at top-left).
 pub struct BBox { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
 ```
 
-### 작업별 결과 타입
+### Per-task result types
 
 ```rust
-pub struct TextBox     { pub bbox: BBox, pub confidence: f32 }                  // 검출
-pub struct Crop        { pub image: image::DynamicImage, pub bbox: BBox }       // 검출→인식 사이
-pub struct Recognized  { pub text: String, pub confidence: f32, pub bbox: BBox }// 인식
-pub struct Detection   { pub bbox: BBox, pub label: String, pub score: f32 }    // 객체 검출
-pub struct Classification { pub label: String, pub score: f32 }                 // 분류
-pub struct LayoutRegion { pub bbox: BBox, pub kind: String, pub score: f32 }    // 레이아웃
-pub struct Mask        { pub width: u32, pub height: u32, pub classes: Vec<u8> }// 세그멘테이션
+pub struct TextBox     { pub bbox: BBox, pub confidence: f32 }                  // detection
+pub struct Crop        { pub image: image::DynamicImage, pub bbox: BBox }       // between detection and recognition
+pub struct Recognized  { pub text: String, pub confidence: f32, pub bbox: BBox }// recognition
+pub struct Detection   { pub bbox: BBox, pub label: String, pub score: f32 }    // object detection
+pub struct Classification { pub label: String, pub score: f32 }                 // classification
+pub struct LayoutRegion { pub bbox: BBox, pub kind: String, pub score: f32 }    // layout
+pub struct Mask        { pub width: u32, pub height: u32, pub classes: Vec<u8> }// segmentation
 
-/// 한 프레임의 종합 분석 결과 — 여러 작업 출력을 모으는 구조화 출력 컨테이너.
+/// Combined analysis of one frame: a structured-output container that gathers multiple task outputs.
 pub struct FrameAnalysis {
     pub recognized:      Vec<Recognized>,
     pub detections:      Vec<Detection>,
@@ -198,20 +187,20 @@ pub struct FrameAnalysis {
 }
 ```
 
-### 영상 시간축 타입
+### Video timeline types
 
 ```rust
-pub struct Timestamp(pub u64);   // 밀리초. to_srt() → "HH:MM:SS,mmm"
+pub struct Timestamp(pub u64);   // milliseconds. to_srt() -> "HH:MM:SS,mmm"
 pub struct Segment { pub start: Timestamp, pub end: Timestamp, pub text: String }
 ```
 
 ---
 
-## 6. 공개 API 레퍼런스
+## 6. Public API Reference
 
-### 6.1 작업 trait
+### 6.1 Task Traits
 
-`tasks` 모듈. 모델을 꽂는 자리다. 모두 `Send + Sync`(멀티스레드 공유 가능).
+The `tasks` module. This is where models plug in. All are `Send + Sync` (shareable across threads).
 
 ```rust
 pub trait TextDetector:   Send + Sync { fn detect(&self, frame: &Frame) -> Result<Vec<TextBox>>; }
@@ -222,225 +211,193 @@ pub trait LayoutAnalyzer: Send + Sync { fn analyze_layout(&self, frame: &Frame) 
 pub trait Segmenter:      Send + Sync { fn segment(&self, frame: &Frame) -> Result<Mask>; }
 ```
 
-### 6.2 OcrEngine — OCR 작업 합성
+### 6.2 OcrEngine: composing the OCR task
 
-검출기 + 인식기를 합성한 OCR 파이프라인. 다른 작업은 각자의 trait 으로 직접 조립한다.
+An OCR pipeline that composes a detector and a recognizer. Other tasks are assembled directly through their own traits.
 
 ```rust
 OcrEngine::new(detector: D, recognizer: R) -> OcrEngine<D, R>   // D: TextDetector, R: TextRecognizer
-fn read(&self, frame: &Frame) -> Result<Vec<Recognized>>        // 검출 → 크롭 → 인식
+fn read(&self, frame: &Frame) -> Result<Vec<Recognized>>        // detect -> crop -> recognize
 fn detector(&self) -> &D
 fn recognizer(&self) -> &R
 
-// 헬퍼: 검출 박스대로 프레임을 잘라 Crop 목록 생성
+// helper: crop the frame by detection boxes into a list of Crops
 crop_regions(frame: &Frame, boxes: &[TextBox]) -> Vec<Crop>
 ```
 
-### 6.3 전처리 (`preprocess`)
+### 6.3 Preprocessing (`preprocess`)
 
-작업 무관 재사용 함수. 이미지를 모델 입력 텐서(NCHW f32)로.
+Task-agnostic reusable functions that turn an image into a model input tensor (NCHW f32).
 
 ```rust
 pub const IMAGENET_MEAN: [f32; 3];  // [0.485, 0.456, 0.406]
 pub const IMAGENET_STD:  [f32; 3];  // [0.229, 0.224, 0.225]
 
-// letterbox(비율 유지+패딩) + 채널별 정규화 → (data[3*h*w], scale). scale 은 박스 역매핑용.
+// letterbox (keep aspect ratio + pad) + per-channel normalization -> (data[3*h*w], scale). scale maps boxes back.
 fn letterbox_chw(img: &DynamicImage, in_h: usize, in_w: usize, mean: [f32;3], std: [f32;3]) -> (Vec<f32>, f32)
 
-// 높이 고정·비율 유지, 폭 우측 0-pad, [-1,1] 정규화 → NCHW (텍스트 인식용)
+// fixed height, keep aspect ratio, right-pad width with 0, normalize to [-1,1] -> NCHW (for text recognition)
 fn fixed_height_chw(img: &DynamicImage, in_h: usize, in_w: usize) -> Vec<f32>
 
-// 정사각/고정 크기 강제 리사이즈(비율 무시) + 채널별 정규화 → NCHW (분류·방향 추정 등 전역구조 모델용)
+// force square/fixed-size resize (ignore aspect ratio) + per-channel normalization -> NCHW (for global-structure models like classification / orientation)
 fn resize_chw(img: &DynamicImage, in_h: usize, in_w: usize, mean: [f32;3], std: [f32;3]) -> Vec<f32>
 ```
 
-### 6.4 후처리 (`postprocess`)
+### 6.4 Postprocessing (`postprocess`)
 
-모델 무관 순수 로직은 단위 테스트로 검증돼 있다.
+The model-agnostic pure logic is covered by unit tests.
 
 ```rust
-fn softmax(logits: &[f32]) -> Vec<f32>            // 수치 안정 softmax
-fn argmax(v: &[f32]) -> (usize, f32)              // top-1 (인덱스, 값)
-fn iou(a: &BBox, b: &BBox) -> f32                 // 교집합/합집합
-fn nms(boxes: &[(BBox, f32)], iou_threshold: f32) -> Vec<usize>   // 비최대 억제 → 유지 인덱스
+fn softmax(logits: &[f32]) -> Vec<f32>            // numerically stable softmax
+fn argmax(v: &[f32]) -> (usize, f32)              // top-1 (index, value)
+fn iou(a: &BBox, b: &BBox) -> f32                 // intersection over union
+fn nms(boxes: &[(BBox, f32)], iou_threshold: f32) -> Vec<usize>   // non-maximum suppression -> kept indices
 fn ctc_greedy_decode(logits: &[f32], t: usize, c: usize, dict: &[String]) -> (String, f32)  // CTC
 fn connected_boxes(prob: &[f32], w: usize, h: usize, threshold: f32, min_area: usize)
-    -> Vec<(usize, usize, usize, usize, f32)>     // DB 검출 후처리(연결요소 박스)
-fn reading_order(boxes: &[BBox]) -> Vec<usize>   // 검출 박스를 읽기 순서(위→아래 줄, 줄 안 왼→오른)로 정렬한 인덱스
-fn xy_cut_order(boxes: &[BBox], min_gap: usize) -> Vec<usize>  // 재귀 XY-Cut 읽기순서(다단·표·나란한 패널 처리)
+    -> Vec<(usize, usize, usize, usize, f32)>     // DB detection post-processing (connected-component boxes)
+fn reading_order(boxes: &[BBox]) -> Vec<usize>   // indices sorting detection boxes into reading order (top-to-bottom rows, left-to-right within a row)
+fn xy_cut_order(boxes: &[BBox], min_gap: usize) -> Vec<usize>  // recursive XY-Cut reading order (handles multi-column, tables, side-by-side panels)
 ```
 
-### 6.5 에러 타입
+### 6.5 Error Types
 
 ```rust
 pub enum VisionError {
     Io(std::io::Error),
-    Decode(String),       // 이미지/영상 디코드 실패
-    Backend(String),      // 모델 로드/추론 에러 (구체 백엔드 에러를 문자열로 흡수)
-    NotWired(&'static str),// 아직 연결 안 된 기능 호출
+    Decode(String),        // image/video decode failure
+    Backend(String),       // model load/inference error (absorbs concrete backend errors into a string)
+    NotWired(&'static str),// call to a not-yet-wired feature
     Unsupported(String),
 }
-pub type OcrError = VisionError;          // 구 명칭 호환 별칭
+pub type OcrError = VisionError;          // backward-compatible alias for the old name
 pub type Result<T> = std::result::Result<T, VisionError>;
 ```
 
-> 에러 타입은 optional 의존성(`tract` 등)에 의존하지 않는다. 백엔드 구체 에러는 문자열로 흡수하므로
-> 어떤 feature 조합에서도 항상 컴파일된다.
+> The error types do not depend on optional dependencies (`tract`, etc.). Concrete backend errors are absorbed into strings, so the crate always compiles under any feature combination.
 
 ---
 
-## 7. 작업별 동작과 성숙도
+## 7. Per-Task Behavior and Maturity
 
-| 작업 | trait / 백엔드 | 상태 |
+| Task | trait / backend | Status |
 |---|---|---|
-| 텍스트 검출 + 인식(OCR) | `TextDetector`/`TextRecognizer`, `TractTextDetector`/`TractTextRecognizer`, `OcrEngine` | **동작 검증됨** — PP-OCRv5 한국어 모델로 실제 화면 사진(폰 촬영 4000x3000) end-to-end 검증. DB unclip·읽기순서 정렬·적응형 검출 해상도·자동 방향보정 포함([화면 캡처/사진 OCR](#94-화면-캡처사진-ocr) 참고) |
-| 이미지 분류 | `Classifier`, `TractClassifier` | 컴파일·구조 완성, **실모델 정확도 미검증** |
-| 객체 검출 | `ObjectDetector`, `TractObjectDetector` | 컴파일됨. **출력 레이아웃을 `[N,6]`=(x1,y1,x2,y2,score,cls)로 가정** — 모델마다 다르니 검증·교체 필요 |
-| 레이아웃 분석 | `LayoutAnalyzer` | **trait 정의만**(레이아웃 라벨을 가진 객체 검출의 특수형) |
-| 세그멘테이션 | `Segmenter`, `Mask` | **trait 정의만**(구체 백엔드 미구현) |
-| 영상 시간축 | `SamplingGate`, `TemporalMerger` | 동작·테스트 완료 ([8장](#8-영상-시간축-처리)). 단 영상 **디코드는 미구현**(Phase 2) |
+| Text detection + recognition (OCR) | `TextDetector`/`TextRecognizer`, `TractTextDetector`/`TractTextRecognizer`, `OcrEngine` | **Verified working.** End-to-end verified on real screen photos (phone-shot 4000x3000) with a PP-OCRv5 Korean model. Includes DB unclip, reading-order sorting, adaptive detection resolution, and automatic orientation correction (see [Screen Capture and Photo OCR](#94-screen-capture-and-photo-ocr)). |
+| Image classification | `Classifier`, `TractClassifier` | Compiles and structurally complete, **accuracy not verified with a real model** |
+| Object detection | `ObjectDetector`, `TractObjectDetector` | Compiles. **Assumes an output layout of `[N,6]` = (x1,y1,x2,y2,score,cls)**, which varies by model, so verify and adapt |
+| Layout analysis | `LayoutAnalyzer` | **Trait definition only** (a specialization of object detection with layout labels) |
+| Segmentation | `Segmenter`, `Mask` | **Trait definition only** (no concrete backend yet) |
+| Video timeline | `SamplingGate`, `TemporalMerger` | Working and tested ([section 8](#8-video-timeline-processing)). But video **decode is not implemented** (Phase 2) |
 
-검증·한계 메모:
+Verification and limitation notes:
 
-- **OCR 정확도는 사전(dict) 정합에 민감하다.** 인식 모델의 클래스 인덱스와 문자 사전이 1:1로 맞아야
-  한다. 모델에 딸린 전용 사전을 써야 하며, 다른 사전을 물리면 글자가 통째로 어긋난다(중국어 사전을
-  한국어 모델에 물리면 한글이 한자로 나오는 식). [11장](#11-모델-준비-onnx-모델사전) 참고.
-- **DB unclip 적용.** DB 검출은 글자보다 수축된 영역을 예측하므로, 크롭 전에 박스를 PaddleOCR 와
-  동일한 방식(오프셋 `d = area×ratio/perimeter`, 기본 비율 1.5)으로 되팽창시켜 글자 가장자리(특히 첫
-  글자)가 잘리는 것을 막는다. `TractTextDetector::with_unclip(ratio)` 로 조정한다. 깨끗한 한글 기준
-  unclip 미적용 시 글자 잘림으로 정확도가 크게 떨어지던 것이 적용 후 정상화됨을 실측 확인했다.
-- **읽기순서 정렬 (XY-Cut).** 연결요소 추출은 래스터 스캔 순서라 단어가 뒤섞여 나온다. 검출기는
-  재귀 XY-Cut(`postprocess::xy_cut_order`)으로 읽기순서를 잡는다 — 박스를 Y 로 투영해 가로 띠(행)로,
-  각 띠를 X 로 투영해 세로 단(열)으로 가르는 것을 재귀해, 다단·표·나란한 패널(표 + 설명) 같은 복잡한
-  레이아웃도 왼쪽 단을 끝까지 읽고 다음 단으로 넘어간다(`--auto-rotate` 로 세운 화면 사진의 패널
-  구조에서 효과 확인). 정렬은 unclip 전 타이트 박스로 한다 — 팽창 박스는 줄끼리 겹쳐 투영 분할을
-  방해하기 때문이다. `with_xycut_gap` 으로 분할 간격을 조정하고, 단순 줄 묶기
-  버전(`reading_order`)도 공개 API 로 남아 있다.
-- **검출 박스는 축 정렬**이다(회전 unclip 미적용). 수평 자막·화면텍스트엔 충분하나 개별 줄이 기울어진
-  텍스트는 후속 고도화 대상이다.
-- **적응형 검출 해상도.** 검출 입력을 입력 이미지 크기에 비례해 정한다(CLI `--det-long`, 긴 변 목표
-  px, 32 배수). 고해상 사진을 작은 고정 입력(예: 736x1280)에 욱여넣어 글자가 뭉개지는 것을 막는다.
-  인식 입력은 48x320 고정(매우 넓은 줄은 잘릴 수 있음).
-- **회전 자동 보정.** 폰을 옆으로 들고 찍은 화면 사진은 내용이 통째 회전돼 있다. CLI `--auto-rotate`
-  가 0/90/180/270° 중 OCR 신뢰도가 가장 높은 방향을 골라 세운다. 회전 분류 모델(PP-LCNet doc-ori)은
-  화면 사진처럼 학습 분포 밖 입력에선 방향(특히 90 vs 270)을 자주 틀려, 분류기 대신 인식 점수를 직접
-  척도로 쓴다(거꾸로면 인식 신뢰도가 바닥나는 성질을 이용). 똑바로 선 입력은 0° 한 번만 보고 빠르게
-  통과하고, 잘 안 읽힐 때만 네 방향을 모두 시도한다.
-- **남은 한계 — 작고 빽빽한 텍스트.** 작은 폼 글자는 해상도 한계로 정확도가 떨어진다. `--det-long`
-  을 올리거나(느려짐) 초해상 전처리가 후속 과제다. 큰/중간 텍스트(제목·설명·문단)는 실제 화면 사진에서
-  정확하게 인식됨을 확인했다.
-- **속도.** 현재 CLI 는 호출당 모델을 새로 적재·최적화한다(server det 88MB 는 적재만 수십 초). 대량
-  배치는 가벼운 mobile det 를 쓰거나, 모델을 한 번만 적재해 여러 장을 처리하는 배치 모드(후속)가 낫다.
-- **동적 입력 ONNX 처리.** PaddleOCR ONNX 는 입력이 동적 차원이라, 백엔드가 로드 시 원시 proto 의
-  입력 차원을 정적으로 고정한 뒤 파싱한다. tract 는 검출(DB)·인식(CRNN/SVTR) 모두 실행 가능함을 확인했다.
+- **OCR accuracy is sensitive to dictionary alignment.** The recognition model's class indices and the character dictionary must correspond 1:1. You must use the dedicated dictionary shipped with the model; a mismatched dictionary shifts every character (feeding a Chinese dictionary to a Korean model turns Hangul into Chinese characters, for example). See [section 11](#11-model-preparation-onnx-models-and-dictionaries).
+- **DB unclip is applied.** DB detection predicts a region shrunk relative to the glyphs, so before cropping, boxes are re-expanded the same way as PaddleOCR (offset `d = area×ratio/perimeter`, default ratio 1.5) to prevent glyph edges (especially the first character) from being clipped. Tune it with `TractTextDetector::with_unclip(ratio)`. On clean Korean, accuracy dropped noticeably from glyph clipping without unclip and was measured to normalize once applied.
+- **Reading-order sorting (XY-Cut).** Connected-component extraction follows raster-scan order, so words come out scrambled. The detector recovers reading order with a recursive XY-Cut (`postprocess::xy_cut_order`): it projects boxes onto Y to cut horizontal bands (rows), then projects each band onto X to cut vertical columns, recursively, so even complex layouts (multi-column, tables, side-by-side panels such as a table plus its description) read the left column fully before moving to the next (the effect is confirmed on the panel structure of screen photos straightened with `--auto-rotate`). Sorting uses the tight boxes before unclip, because expanded boxes overlap between lines and interfere with the projection split. Adjust the split gap with `with_xycut_gap`; a simple line-grouping version (`reading_order`) also remains in the public API.
+- **Detection boxes are axis-aligned** (no rotated unclip). This is sufficient for horizontal subtitles and on-screen text, but skewed individual lines are a target for future work.
+- **Adaptive detection resolution.** The detection input is sized in proportion to the input image (CLI `--det-long`, the target long-side px, a multiple of 32). This prevents glyphs from being smeared when a high-resolution photo is forced into a small fixed input (for example 736x1280). The recognition input is fixed at 48x320 (very wide lines may be clipped).
+- **Automatic orientation correction.** A screen photo shot with the phone held sideways is entirely rotated. CLI `--auto-rotate` picks, among 0/90/180/270 degrees, the orientation with the highest OCR confidence and straightens it. The orientation classifier (PP-LCNet doc-ori) frequently gets the direction wrong (especially 90 vs 270) on out-of-distribution inputs like screen photos, so instead of the classifier we use the recognition score directly as the metric (exploiting the fact that recognition confidence bottoms out when the input is upside down). A straight input is checked at 0 degrees once and passes quickly; all four orientations are tried only when it does not read well.
+- **Remaining limitation: small, dense text.** Small form text loses accuracy at the resolution limit. Raising `--det-long` (slower) or super-resolution preprocessing is future work. Large and medium text (titles, descriptions, paragraphs) is confirmed to be recognized accurately on real screen photos.
+- **Speed.** The CLI currently loads and optimizes the model on every call (loading the 88MB server det alone takes tens of seconds). For large batches, use the lightweight mobile det, or a batch mode (future) that loads the model once and processes many images.
+- **Dynamic-input ONNX handling.** PaddleOCR ONNX has dynamic input dimensions, so the backend statically fixes the raw proto's input dimensions at load time before parsing. tract was confirmed able to run both detection (DB) and recognition (CRNN/SVTR).
 
 ---
 
-## 8. 영상 시간축 처리
+## 8. Video Timeline Processing
 
-영상에서 텍스트를 뽑을 때의 차별점 — 모든 프레임을 인식하지 않고, 변화가 있는 프레임만 인식한 뒤
-인접 프레임의 중복을 시간 구간으로 병합한다.
+What makes text extraction from video different: instead of recognizing every frame, only frames that changed are recognized, and duplicates across adjacent frames are merged into time segments.
 
-### 8.1 SSIM 샘플링 게이트
+### 8.1 SSIM sampling gate
 
-직전 키프레임과 구조적 유사도(SSIM)가 충분히 높으면 프레임을 버린다. 30fps 영상에서 자막은 초당 수
-프레임만 바뀌므로, 통과율을 한 자릿수 %까지 낮춰 인식 호출 자체를 줄인다.
+If the structural similarity (SSIM) to the previous keyframe is high enough, the frame is dropped. In a 30fps video, subtitles change only a few frames per second, so the pass rate can be lowered to single-digit percent, cutting the recognition calls themselves.
 
 ```rust
-let mut gate = SamplingGate::new(0.98);        // 임계값(높을수록 덜 버림). with_scale 로 비교 크기 조정
-if gate.admit(&frame) {                        // true=통과(새 프레임), false=스킵(직전과 동일)
-    // 이 프레임만 OCR
+let mut gate = SamplingGate::new(0.98);        // threshold (higher drops fewer). with_scale adjusts the comparison size
+if gate.admit(&frame) {                        // true = admit (new frame), false = skip (same as previous)
+    // OCR only this frame
 }
-ssim(&gray_a, &gray_b) -> f64                  // 두 그레이스케일 이미지의 전역 SSIM
+ssim(&gray_a, &gray_b) -> f64                  // global SSIM of two grayscale images
 ```
 
-### 8.2 temporal 병합
+### 8.2 Temporal merging
 
-게이트를 통과한 인접 프레임의 인식 결과는 거의 같은 텍스트일 수 있다. 정규화 Levenshtein 유사도로
-"같은 자막의 연속"을 하나의 `(start, end, text)` 구간으로 합친다.
+Recognition results from adjacent frames that pass the gate may be nearly the same text. Using normalized Levenshtein similarity, "a continuous run of the same subtitle" is merged into a single `(start, end, text)` segment.
 
 ```rust
-let mut merger = TemporalMerger::new(0.8);     // 유사도 임계값
-if let Some(seg) = merger.push(timestamp, text) { /* 자막이 바뀜 → 직전 구간 확정 */ }
-let last = merger.finish();                     // 스트림 끝 → 마지막 구간 회수
+let mut merger = TemporalMerger::new(0.8);     // similarity threshold
+if let Some(seg) = merger.push(timestamp, text) { /* subtitle changed -> finalize the previous segment */ }
+let last = merger.finish();                     // end of stream -> flush the last segment
 ```
 
-### 8.3 출력 직렬화 (`emit`)
+### 8.3 Output serialization (`emit`)
 
 ```rust
-emit::to_srt(&segments)  -> String          // SRT 자막
-emit::to_json(&segments) -> Result<String>  // JSON 배열(타임스탬프 ms)
-emit::to_plain(&segments)-> String          // 텍스트만 줄바꿈 연결
+emit::to_srt(&segments)  -> String          // SRT subtitles
+emit::to_json(&segments) -> Result<String>  // JSON array (timestamps in ms)
+emit::to_plain(&segments)-> String          // text only, joined by newlines
 ```
 
 ---
 
-## 9. CLI 도구 (`roct`)
+## 9. CLI Tool (`roct`)
 
-`--features cli` 로 빌드된다.
+Built with `--features cli`.
 
 ```bash
 cargo build --release --features cli
 ```
 
-| 서브커맨드 | 인자 | 동작 |
+| Subcommand | Arguments | Behavior |
 |---|---|---|
-| `image` | `<path>` `--det-model` `--rec-model` `--dict` `[--auto-rotate]` `[--det-long N]` | 이미지 OCR(검출+인식). `--auto-rotate` 는 회전 자동보정, `--det-long` 은 검출 해상도(긴 변 px, 기본 1600). 결과를 `[score] (x,y,w,h) text` 로 출력 |
-| `classify` | `<path>` `--model` `--labels` | 이미지 분류(top-k) |
-| `ssim` | `<a> <b>` | 두 이미지의 구조적 유사도 출력(샘플링 게이트 지표) |
-| `srt` | `<segments.json>` | 시간 구간 JSON → SRT 자막(stdout) |
-| `video` | `<path>` | 영상 OCR — Phase 2, 현재 `NotWired` 에러 반환 |
+| `image` | `<path>` `--det-model` `--rec-model` `--dict` `[--auto-rotate]` `[--det-long N]` | image OCR (detection + recognition). `--auto-rotate` for automatic orientation correction, `--det-long` for detection resolution (long-side px, default 1600). Prints results as `[score] (x,y,w,h) text`. |
+| `classify` | `<path>` `--model` `--labels` | image classification (top-k) |
+| `ssim` | `<a> <b>` | prints the structural similarity of two images (the sampling-gate metric) |
+| `srt` | `<segments.json>` | time-segment JSON -> SRT subtitles (stdout) |
+| `video` | `<path>` | video OCR. Phase 2, currently returns a `NotWired` error |
 
 ```bash
-# 이미지 OCR (스캔/스크린샷처럼 똑바로 선 입력)
+# Image OCR (a straight input like a scan/screenshot)
 roct image page.png --det-model models/det.onnx --rec-model models/rec.onnx --dict models/dict.txt
 
-# 이미지 분류 (모델 + 라벨 목록)
+# Image classification (model + label list)
 roct classify cat.jpg --model models/cls.onnx --labels models/imagenet.txt
 
-# 구간 JSON → SRT
+# segment JSON -> SRT
 roct srt segments.json > out.srt
 ```
 
-### 9.4 화면 캡처/사진 OCR
+### 9.4 Screen Capture and Photo OCR
 
-폰으로 찍은 화면 사진이나 고해상 캡처는 두 가지가 결정적이다 — 회전과 검출 해상도. `--auto-rotate`
-로 방향을 자동으로 세우고, `--det-long` 으로 검출 해상도를 입력 크기에 맞춰 올린다.
+For a phone-shot screen photo or a high-resolution capture, two things are decisive: orientation and detection resolution. Use `--auto-rotate` to straighten the orientation automatically, and `--det-long` to raise the detection resolution to match the input size.
 
 ```bash
-# 화면 사진 OCR (회전 자동보정 + 입력 비례 해상도)
+# Screen-photo OCR (automatic orientation correction + input-proportional resolution)
 roct image photo.jpg \
   --det-model models/det.onnx --rec-model models/rec.onnx --dict models/dict.txt \
   --auto-rotate --det-long 1600
 ```
 
-동작과 옵션:
+Behavior and options:
 
-- **`--auto-rotate`** — 0/90/180/270° 중 OCR 신뢰도(고신뢰 영역 수)가 가장 높은 방향을 고른다.
-  똑바로 선 입력은 0° 한 번만 보고 빠르게 통과하고, 0° 가 잘 안 읽힐 때만 네 방향을 모두 시도한다.
-- **`--det-long N`** — 검출 입력의 긴 변 목표 px(32 배수로 반올림, 기본 1600). 작은 글자가 안 잡히면
-  올린다(느려진다).
-- **세밀 튜닝** — DB unclip 비율(기본 1.5)·XY-Cut 분할 간격(기본 8)은 Rust API 의 빌더
-  (`TractTextDetector::with_unclip` / `with_xycut_gap`)로 조정한다.
-- **속도** — 큰 server det 는 적재가 느리다. 대량 배치는 가벼운 mobile det 로 방향을 빠르게 잡는 식이
-  실용적이다. 검출·인식 모델과 사전 출처는 [11장](#11-모델-준비-onnx-모델사전) 참고.
+- **`--auto-rotate`**: picks, among 0/90/180/270 degrees, the orientation with the highest OCR confidence (the number of high-confidence regions). A straight input is checked at 0 degrees once and passes quickly; all four orientations are tried only when 0 degrees does not read well.
+- **`--det-long N`**: the target long-side px of the detection input (rounded to a multiple of 32, default 1600). Raise it when small text is not detected (slower).
+- **Fine tuning**: the DB unclip ratio (default 1.5) and the XY-Cut split gap (default 8) are adjusted through the Rust API builders (`TractTextDetector::with_unclip` / `with_xycut_gap`).
+- **Speed**: the large server det is slow to load. For large batches, using the lightweight mobile det to quickly find the orientation is practical. See [section 11](#11-model-preparation-onnx-models-and-dictionaries) for the detection/recognition models and dictionaries.
 
 ---
 
-## 10. Python 바인딩 (PyO3)
+## 10. Python Bindings (PyO3)
 
-**abi3(stable ABI)** 로 빌드되어 Python 3.9+ 단일 휠로 호환된다(C++ 런타임 의존 없는 순수 Rust 휠).
+Built with **abi3 (stable ABI)**, so a single wheel is compatible with Python 3.9+ (a pure-Rust wheel with no C++ runtime dependency).
 
-Python 에서 이미지 OCR(`recognize_image`)과 코어 유틸리티를 호출한다. 모델·사전 파일은 호출자가
-제공한다([11장](#11-모델-준비-onnx-모델사전)). 영상 처리(`read_video`)는 영상 디코드(Phase 2)와 함께 추가된다.
+From Python you call image OCR (`recognize_image`) and the core utilities. The caller provides the model and dictionary files (see [section 11](#11-model-preparation-onnx-models-and-dictionaries)). Video processing (`read_video`) will be added together with video decode (Phase 2).
 
-### 설치
+### Installation
 
 ```bash
-# PyPI 게시 후 — Rust 툴체인 불필요
+# After PyPI publication: no Rust toolchain needed
 pip install rust_ocr_transformer
 
-# 소스에서(최신 main / 게시 전) — 설치 머신에 Rust 툴체인 필요
+# From source (latest main / before publication): requires a Rust toolchain on the install machine
 pip install "git+https://github.com/arabangoo/rust_ocr_transformer"
 ```
 
@@ -450,85 +407,78 @@ pip install "git+https://github.com/arabangoo/rust_ocr_transformer"
 import json
 import rust_ocr_transformer as roct
 
-roct.__version__                              # "0.2.1"
+roct.__version__                              # "0.2.2"
 
-# 이미지 OCR — 검출+인식 결과를 JSON 문자열로 (DB unclip·XY-Cut 읽기순서 기본 적용)
+# Image OCR: detection + recognition results as a JSON string (DB unclip and XY-Cut reading order applied by default)
 out = roct.recognize_image("page.png", "models/det.onnx", "models/rec.onnx", "models/dict.txt")
 
-# 폰으로 찍은 화면 사진 — 회전 자동보정 + 검출 해상도 비례
+# A phone-shot screen photo: automatic orientation correction + proportional detection resolution
 out = roct.recognize_image("photo.jpg", "models/det.onnx", "models/rec.onnx", "models/dict.txt",
                            auto_rotate=True, det_long=1600)
 for r in json.loads(out):
     print(r["confidence"], r["text"], r["bbox"])   # {"x":..,"y":..,"width":..,"height":..}
 
-# 코어 유틸리티
-roct.image_ssim("a.png", "b.png")             # 두 이미지의 구조적 유사도(0.0-1.0)
-roct.segments_to_srt(segments_json)           # 시간 구간 JSON 문자열 → SRT 자막 문자열
+# Core utilities
+roct.image_ssim("a.png", "b.png")             # structural similarity of two images (0.0-1.0)
+roct.segments_to_srt(segments_json)           # time-segment JSON string -> SRT subtitle string
 ```
 
-`recognize_image` 의 선택 인자 — `auto_rotate`(기본 `False`, 0/90/180/270° 자동 보정) ·
-`det_long`(기본 1600, 검출 입력 긴 변 px). DB unclip 과 XY-Cut 읽기순서는 항상 적용된다.
+Optional arguments of `recognize_image`: `auto_rotate` (default `False`, 0/90/180/270-degree automatic correction) and `det_long` (default 1600, the detection input long-side px). DB unclip and XY-Cut reading order are always applied.
 
-### 빌드 (개발자 · 게시자)
+### Building (developers and publishers)
 
-루트 `pyproject.toml`(maturin 백엔드)이 빌드 메타데이터를 제공한다. `[tool.maturin] features = ["python"]`
-덕분에 `--features python` 을 생략해도 된다.
+The root `pyproject.toml` (maturin backend) provides the build metadata. Thanks to `[tool.maturin] features = ["python"]`, you can omit `--features python`.
 
 ```bash
 pip install maturin
-maturin develop --release          # 현재 venv 에 설치
-maturin build --release            # target/wheels/ 에 휠 빌드
+maturin develop --release          # install into the current venv
+maturin build --release            # build a wheel into target/wheels/
 ```
 
 ---
 
-## 11. 모델 준비 (ONNX 모델·사전)
+## 11. Model Preparation (ONNX Models and Dictionaries)
 
-이 프레임워크는 모델을 담지 않는다 — 추론에는 ONNX 모델 파일과(인식의 경우) 문자 사전이 필요하다.
-모델 가중치는 레포에 커밋하지 않는다(`.gitignore` 가 `*.onnx` 와 `models/` 를 제외).
+This framework does not bundle models. Inference needs an ONNX model file and (for recognition) a character dictionary. Model weights are not committed to the repo (`.gitignore` excludes `*.onnx` and `models/`).
 
-### PaddleOCR ONNX 모델 (검증에 사용한 출처)
+### PaddleOCR ONNX models (source used for verification)
 
-사전 변환된 PP-OCR ONNX 모델과 사전을 직접 받을 수 있다(PaddlePaddle, Apache-2.0).
+You can download pre-converted PP-OCR ONNX models and dictionaries directly (PaddlePaddle, Apache-2.0).
 
 ```bash
 mkdir -p models
 base="https://github.com/GreatV/oar-ocr/releases/download/v0.3.0"
-# 검출(언어 무관)
+# detection (language-agnostic)
 curl -sL -o models/det.onnx       "$base/pp-ocrv5_mobile_det.onnx"
-# 인식(언어별) — 예: 한국어 PP-OCRv5
+# recognition (per-language), e.g. Korean PP-OCRv5
 curl -sL -o models/rec.onnx       "$base/korean_pp-ocrv5_mobile_rec.onnx"
-# 문자 사전 — 반드시 인식 모델과 짝이 맞는 것
+# character dictionary: must match the recognition model
 curl -sL -o models/dict.txt       "$base/ppocrv5_korean_dict.txt"
 ```
 
-영어·라틴·일본어 등 다른 언어 인식 모델과 그에 맞는 사전도 같은 릴리스에 있다.
+Recognition models for other languages (English, Latin, Japanese, and so on) and their matching dictionaries are in the same release.
 
-### HuggingFace 출처 (화면 사진 검증에 사용)
+### HuggingFace source (used for screen-photo verification)
 
-언어별 인식 모델·사전과 함께 회전 보정용 방향 모델(PP-LCNet doc-orientation)까지 한 곳에서 받을 수
-있는 출처다(PaddlePaddle 변환, Apache-2.0). 실제 한국어 화면 사진 검증에 이 세트를 사용했다.
+A source where you can get per-language recognition models and dictionaries along with the orientation model for rotation correction (PP-LCNet doc-orientation), all in one place (PaddlePaddle conversion, Apache-2.0). This set was used for the real Korean screen-photo verification.
 
 ```bash
 mkdir -p models
 base="https://huggingface.co/monkt/paddleocr-onnx/resolve/main"
-# 검출(server, 고정확)
+# detection (server, high accuracy)
 curl -sL -o models/det.onnx   "$base/detection/v5/det.onnx"
-# 인식(한국어) + 사전
+# recognition (Korean) + dictionary
 curl -sL -o models/rec.onnx   "$base/languages/korean/rec.onnx"
 curl -sL -o models/dict.txt   "$base/languages/korean/dict.txt"
-# (선택) 가벼운 mobile 검출 — 대량 배치/방향 탐색용
+# (optional) lightweight mobile detection, for large batches / orientation search
 curl -sL -o models/det_mobile.onnx "$base/detection/v3/det.onnx"
 ```
 
-> 한국어 사전은 조합형 자모(U+1100 블록)로 시작하지만, 인식 모델은 완성형 음절을 직접 출력하므로
-> 별도 NFC 정규화가 필요 없다(실측 확인). 검출은 server(v5, 약 88MB)가 정확하나 적재가 느리고,
-> mobile(v3, 약 2.4MB)은 빠르나 단어 분할·정확도가 다소 낮다.
+> The Korean dictionary starts with decomposed jamo (the U+1100 block), but the recognition model outputs precomposed syllables directly, so no separate NFC normalization is needed (verified). For detection, server (v5, about 88MB) is accurate but slow to load, while mobile (v3, about 2.4MB) is fast but has somewhat weaker word splitting and accuracy.
 
-### 다국어 인식 (언어별 모델·사전)
+### Multilingual recognition (per-language models and dictionaries)
 
-검출(det)·방향(doc-ori) 모델은 언어 무관 공용이고, 인식(rec)·사전(dict)만 언어별로 바꾼다. 같은
-출처에서 주요 언어 모델·사전을 한꺼번에 받을 수 있다.
+The detection (det) and orientation (doc-ori) models are language-agnostic and shared; only the recognition (rec) and dictionary (dict) change per language. You can download the major-language models and dictionaries in one go from the same source.
 
 ```bash
 base="https://huggingface.co/monkt/paddleocr-onnx/resolve/main"
@@ -539,60 +489,55 @@ for L in arabic chinese english eslav greek hindi korean latin tamil telugu thai
 done
 ```
 
-| 언어 | 폴더 | 비고 |
+| Language | Folder | Notes |
 |---|---|---|
-| 중국어·일본어(CJK) | `chinese` | 한자(약 15,500) + 가나(히라가나·가타카나) 포함 — 일본어도 이 모델로 인식(실측: こんにちは世界·東京タワー·日本語認識テスト 정확). server급(약 80MB) |
-| 영어 | `english` | 라틴 영숫자·기호 |
-| 한국어 | `korean` | 완성형 한글 출력 |
-| 라틴(유럽어) | `latin` | 프랑스·독일·스페인 등 라틴 문자권 |
-| 그 외 | `arabic` · `eslav`(키릴) · `greek` · `hindi` · `tamil` · `telugu` · `thai` | 각 문자권 |
+| Chinese/Japanese (CJK) | `chinese` | includes Han characters (about 15,500) and kana (hiragana/katakana). Japanese is recognized by this model too (verified: こんにちは世界, 東京タワー, 日本語認識テスト accurate). Server-class (about 80MB). |
+| English | `english` | Latin alphanumerics and symbols |
+| Korean | `korean` | outputs precomposed Hangul |
+| Latin (European) | `latin` | Latin-script languages such as French, German, Spanish |
+| Others | `arabic` · `eslav` (Cyrillic) · `greek` · `hindi` · `tamil` · `telugu` · `thai` | each script |
 
-언어 전환은 인식 모델·사전 경로만 바꾸면 된다(검출 모델은 그대로):
+To switch languages, change only the recognition model and dictionary paths (the detection model stays the same):
 
 ```bash
-# 일본어 (CJK 모델 — 한자 + 가나)
+# Japanese (CJK model: Han + kana)
 roct image jp.png --det-model models/det.onnx \
   --rec-model models/langs/chinese/rec.onnx --dict models/langs/chinese/dict.txt --auto-rotate
 
-# 영어
+# English
 roct image en.png --det-model models/det.onnx \
   --rec-model models/langs/english/rec.onnx --dict models/langs/english/dict.txt
 ```
 
-> 일본어는 PP-OCRv5 에서 별도 모델이 아니라 CJK 범용(`chinese`) 모델이 한자·가나를 함께 처리한다.
+> In PP-OCRv5, Japanese is not a separate model; the general CJK (`chinese`) model handles Han characters and kana together.
 
-> **사전은 모델과 정확히 짝이 맞아야 한다.** 인식 모델의 출력 클래스 수와 사전 길이·문자 순서가 1:1로
-> 대응해야 정상 인식된다. 같은 언어라도 모델 버전(v3/v4/v5)에 따라 사전이 다르므로, 모델과 함께 배포된
-> 전용 사전을 쓴다. 사전이 어긋나면 글자가 통째로 잘못 매핑된다.
+> **The dictionary must match the model exactly.** The recognition model's number of output classes and the dictionary's length and character order must correspond 1:1 for correct recognition. Even for the same language, the dictionary differs by model version (v3/v4/v5), so use the dedicated dictionary distributed with the model. A mismatched dictionary maps every character incorrectly.
 
-### 입력 형상
+### Input shapes
 
-백엔드 생성 시 입력 형상을 지정한다(PP-OCRv5 권장값): 검출 `(736, 1280)`, 인식 `(48, 320)`, 분류 `(224, 224)`.
-모델은 동적 입력이어도 백엔드가 이 형상으로 고정해 적재한다.
+Specify the input shape when constructing a backend (PP-OCRv5 recommended values): detection `(736, 1280)`, recognition `(48, 320)`, classification `(224, 224)`. Even if the model has dynamic inputs, the backend fixes it to this shape at load time.
 
 ---
 
-## 12. 서비스 파이프라인에 붙이기
+## 12. Embedding into a Service Pipeline
 
-이 라이브러리는 단독 앱이 아니라 비전 입력 단에 박아 넣는 코어 의존성이다. 추출된 구조화 결과(텍스트·
-박스·구간)는 그 자체로 쓰거나, 검색 증강 생성(RAG) 인제스트의 비전 입구로 흘려보낸다.
+This library is not a standalone app; it is a core dependency you embed at the vision input stage. The extracted structured results (text, boxes, segments) are useful on their own, or you can feed them into the vision entry point of a retrieval-augmented-generation (RAG) ingest.
 
-### 12.1 Rust 서비스에 임베드
+### 12.1 Embed into a Rust service
 
-추론은 CPU 바운드이므로 async 서버(axum/actix)에서는 `spawn_blocking` 으로 감싼다. 모델은 한 번
-로드해 재사용한다(엔진을 `Arc` 로 공유 — trait 이 `Send + Sync`).
+Inference is CPU-bound, so wrap it in `spawn_blocking` inside an async server (axum/actix). Load the model once and reuse it (share the engine via `Arc`, since the traits are `Send + Sync`).
 
 ```rust
 use std::sync::Arc;
 use rust_ocr_transformer::{Frame, OcrEngine, TractTextDetector, TractTextRecognizer};
 
-// 기동 시 1회 로드 후 공유
+// load once at startup, then share
 let engine = Arc::new(OcrEngine::new(
     TractTextDetector::new("models/det.onnx", (736, 1280))?,
     TractTextRecognizer::new("models/rec.onnx", "models/dict.txt", (48, 320))?,
 ));
 
-// 핸들러
+// handler
 let eng = engine.clone();
 let results = tokio::task::spawn_blocking(move || {
     let frame = Frame::from_path("upload.png")?;
@@ -600,9 +545,9 @@ let results = tokio::task::spawn_blocking(move || {
 }).await??;
 ```
 
-### 12.2 영상 → 자막(SRT) 파이프라인
+### 12.2 Video to subtitles (SRT) pipeline
 
-SSIM 게이트로 프레임을 솎고, 통과 프레임만 OCR 한 뒤 temporal 병합으로 자막 구간을 만든다.
+The SSIM gate thins frames, only passing frames are OCR'd, and temporal merging forms subtitle segments.
 
 ```rust
 use rust_ocr_transformer::{SamplingGate, TemporalMerger, emit};
@@ -611,8 +556,8 @@ let mut gate = SamplingGate::new(0.98);
 let mut merger = TemporalMerger::new(0.85);
 let mut segments = Vec::new();
 
-for frame in frames {                       // 영상 디코드는 호출자 측(Phase 2 전까지)
-    if !gate.admit(&frame) { continue; }    // 변화 없는 프레임 스킵
+for frame in frames {                       // video decode is on the caller side (until Phase 2)
+    if !gate.admit(&frame) { continue; }    // skip unchanged frames
     let text = engine.read(&frame)?
         .iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
     if let Some(seg) = merger.push(frame.timestamp, &text) { segments.push(seg); }
@@ -621,10 +566,9 @@ if let Some(seg) = merger.finish() { segments.push(seg); }
 std::fs::write("out.srt", emit::to_srt(&segments))?;
 ```
 
-### 12.3 타 언어 / 배치 — CLI 래핑
+### 12.3 Other languages / batch: wrap the CLI
 
-Python·Rust 가 아닌 스택이나 배치 잡에서는 `roct` 바이너리를 subprocess 로 호출한다. 단일 정적
-바이너리라 컨테이너에 `roct` 하나만 넣으면 된다(런타임 의존 없음).
+From non-Python, non-Rust stacks or from batch jobs, call the `roct` binary as a subprocess. It is a single static binary, so you only need to drop `roct` into your container (no runtime dependency).
 
 ```bash
 roct image /data/page.png --det-model det.onnx --rec-model rec.onnx --dict dict.txt
@@ -632,13 +576,13 @@ roct image /data/page.png --det-model det.onnx --rec-model rec.onnx --dict dict.
 
 ---
 
-## 13. 새 작업·백엔드 추가하기
+## 13. Adding a New Task or Backend
 
-코어를 건드리지 않고 새 모델·새 작업을 끼울 수 있다.
+You can plug in a new model or a new task without touching the core.
 
-### 13.1 새 백엔드 — 기존 작업 trait 구현
+### 13.1 New backend: implement an existing task trait
 
-예: 자체 분류 모델을 `Classifier` 로. 공용 [`TractModel`](#64-tract-백엔드) 러너 + 재사용 전·후처리를 쓰면 짧다.
+For example, wire your own classification model as a `Classifier`. Using the shared [`TractModel`](#133-the-tract-backend-reference) runner plus the reusable pre/post-processing keeps it short.
 
 ```rust
 use rust_ocr_transformer::{Classifier, Classification, Frame, Result, TractModel};
@@ -659,91 +603,88 @@ impl Classifier for MyClassifier {
 }
 ```
 
-### 13.2 새 작업 — 새 trait
+### 13.2 New task: a new trait
 
-기존 6개로 표현 안 되는 작업(예: 키포인트·깊이 추정)은 `tasks` 패턴대로 `Send + Sync` trait 을 새로
-정의하고 `Frame` 을 입력으로 받게 만든다. 전·후처리는 `preprocess`/`postprocess` 의 재사용 함수를 쓴다.
+For a task the existing six do not express (for example keypoints or depth estimation), define a new `Send + Sync` trait following the `tasks` pattern and have it take a `Frame` as input. For pre/post-processing, reuse the functions in `preprocess`/`postprocess`.
 
-### 13.3 tract 백엔드 (참고)
+### 13.3 The tract Backend (reference)
 
-`backends::tract` 가 제공하는 것:
+What `backends::tract` provides:
 
 ```rust
-TractModel::load(path, in_h, in_w) -> Result<TractModel>   // 동적 입력도 정적 고정 후 적재
+TractModel::load(path, in_h, in_w) -> Result<TractModel>   // loads even dynamic inputs after fixing them statically
 fn dims(&self) -> (usize, usize)
-fn run(&self, data: Vec<f32>) -> Result<(Vec<f32>, Vec<usize>)>  // (출력 슬라이스, 형상)
+fn run(&self, data: Vec<f32>) -> Result<(Vec<f32>, Vec<usize>)>  // (output slice, shape)
 
-TractTextDetector::new(model, (h, w))            // .with_threshold(f32) · .with_unclip(ratio) — DB 박스 되팽창
+TractTextDetector::new(model, (h, w))            // .with_threshold(f32) . with_unclip(ratio) re-expands DB boxes
 TractTextRecognizer::new(model, dict, (h, w))
 TractClassifier::new(model, labels, (h, w))      // .with_top_k(usize)
 TractObjectDetector::new(model, labels, (h, w))  // .with_thresholds(score, iou)
-TractDocOrientation::new(model, (h, w))          // 방향 분류 0/90/180/270 → .predict_conf / .correct(frame, min_conf)
+TractDocOrientation::new(model, (h, w))          // orientation classification 0/90/180/270 -> .predict_conf / .correct(frame, min_conf)
 ```
 
 ---
 
-## 14. 빌드 · Feature 조합 · 테스트
+## 14. Build, Feature Combinations, and Testing
 
-이 저장소를 clone 한 경우, 쓰려면 **Rust 툴체인(stable, 1.74 이상 권장)** 으로 한 번 빌드해야 한다.
+If you clone this repository, you need to build it once with a **Rust toolchain (stable, 1.74 or newer recommended)** before using it.
 
-| 쓰는 방식 | 빌드 명령 | 결과물 |
+| Use case | Build command | Result |
 |---|---|---|
-| CLI 도구 | `cargo build --release --features cli` | `target/release/roct` 단일 바이너리 |
-| Python 모듈 | `pip install maturin && maturin develop --release` | 현재 venv 에 `import rust_ocr_transformer` |
-| Rust 라이브러리 | `Cargo.toml` 에 `path`/`git` 의존성 | 다른 Rust 프로젝트에 링크 |
+| CLI tool | `cargo build --release --features cli` | the single `target/release/roct` binary |
+| Python module | `pip install maturin && maturin develop --release` | `import rust_ocr_transformer` in the current venv |
+| Rust library | a `path`/`git` dependency in `Cargo.toml` | links into another Rust project |
 
 ```bash
-# 기본: 순수 Rust(tract) 백엔드 포함, zero FFI
+# Default: includes the pure-Rust (tract) backend, zero FFI
 cargo build --release
 
-# 코어 IP 만 (백엔드 직접 주입)
+# Core IP only (inject the backend yourself)
 cargo build --release --no-default-features
 
 # CLI / Python
 cargo build --release --features cli
 maturin develop --release
 
-# 테스트 / 린트
-cargo test                  # 후처리 순수 로직(softmax·argmax·IoU·NMS·CTC) + 파이프라인 통합
+# Test / lint
+cargo test                  # postprocessing pure logic (softmax, argmax, IoU, NMS, CTC) + pipeline integration
 cargo clippy --all-targets
 ```
 
-테스트는 외부 모델 없이 동작하는 범위를 검증한다 — 합성 이미지로 SSIM 게이트·temporal 병합·SRT
-출력·trait 합성 엔진 결선을, 합성 텐서로 NMS·softmax·CTC·IoU 후처리를 결정적으로 확인한다
-(`tests/pipeline.rs`, `src/postprocess.rs` 단위 테스트).
+The tests verify what works without external models: with synthetic images they check the SSIM gate, temporal merging, SRT output, and trait-composition engine wiring, and with synthetic tensors they deterministically check NMS, softmax, CTC, and IoU postprocessing (`tests/pipeline.rs`, unit tests in `src/postprocess.rs`).
 
 ---
 
-## 15. 디렉토리 구조
+## 15. Directory Layout
 
 ```text
 rust_ocr_transformer/
   Cargo.toml
-  README.md              # 이 문서
+  README.md              # this document
   LICENSE                # Apache-2.0
   src/
-    lib.rs               # 크레이트 루트 · re-export
-    types.rs             # 공통 타입(Frame/BBox/결과 타입/FrameAnalysis/Segment)
-    tasks.rs             # 작업 trait(TextDetector/Recognizer/ObjectDetector/Classifier/...)
-    engine.rs            # OcrEngine(검출+인식 합성) · crop_regions
-    preprocess.rs        # letterbox · 정규화 · CHW 텐서화
-    postprocess.rs       # NMS · softmax · argmax · IoU · CTC · DB 연결요소 박스 (+ 단위 테스트)
-    sampler.rs           # SSIM 샘플링 게이트(영상)
-    temporal.rs          # temporal 병합(영상)
-    emit.rs              # SRT / JSON / 평문 직렬화
+    lib.rs               # crate root, re-exports
+    types.rs             # common types (Frame/BBox/result types/FrameAnalysis/Segment)
+    tasks.rs             # task traits (TextDetector/Recognizer/ObjectDetector/Classifier/...)
+    engine.rs            # OcrEngine (detection + recognition composition), crop_regions
+    preprocess.rs        # letterbox, normalization, CHW tensorization
+    postprocess.rs       # NMS, softmax, argmax, IoU, CTC, DB connected-component boxes (+ unit tests)
+    sampler.rs           # SSIM sampling gate (video)
+    temporal.rs          # temporal merging (video)
+    emit.rs              # SRT / JSON / plaintext serialization
     error.rs             # VisionError / Result
-    python.rs            # PyO3 바인딩 (feature = "python")
+    python.rs            # PyO3 bindings (feature = "python")
     bin/
-      roct.rs            # CLI 바이너리 (feature = "cli")
+      roct.rs            # CLI binary (feature = "cli")
     backends/
-      mod.rs             # feature 게이트
-      tract.rs           # 순수 Rust 추론 백엔드 (feature = "tract")
+      mod.rs             # feature gates
+      tract.rs           # pure-Rust inference backend (feature = "tract")
   tests/
-    pipeline.rs          # 합성 픽스처 기반 통합 테스트
+    pipeline.rs          # synthetic-fixture integration tests
 ```
 
 ---
 
-## 16. 라이선스
+## 16. License
 
 Apache-2.0
